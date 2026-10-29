@@ -2,41 +2,55 @@
 
 ## 1. Executive Disclosure
 
-This project was developed by pair-programming with an advanced agentic AI assistant (Antigravity IDE) serving as a senior financial-data systems architect and Python engineer. This document details the role of AI both during development and within the runtime system architecture.
+This project was developed through pair programming between a human engineer and an agentic AI assistant (Antigravity IDE), acting as a senior financial-data systems architect and Python engineer. This document provides full disclosure of AI usage during both development and within the runtime application architecture, with particular focus on where generative AI failed and how deterministic guardrails corrected those failures.
 
 ---
 
 ## 2. AI in the Application Runtime Architecture
 
-### 2.1 The Core Safety Mandate: Separation of LLM from Accounting Decisions
-In mission-critical enterprise financial reporting, generative AI models must **never** make authoritative accounting decisions:
-- Large Language Models are probabilistic and prone to hallucination, subtle arithmetic drifts, and prompt injection.
-- Consequently, this prototype enforces an absolute architectural boundary:
-  1. **Deterministic Accounting Engine:** 100% of accounting decisions (balancing equations, COA postability, duplicate detection, FX revaluation deltas, and journal dispositions) are executed by deterministic Python algorithms using fixed-scale `Decimal` arithmetic.
-  2. **Decoupled Narrative Explanations:** The LLM's role is strictly confined to generating plain-English explanations and diagnostic summaries for human auditors. The LLM output is purely explanatory and has no write-back path to alter dispositions, amounts, or account codes.
+### 2.1 The Core Safety Mandate: Absolute Decoupling of LLM from Accounting Logic
+In enterprise financial reporting, generative AI models must **never** make authoritative accounting decisions:
+- Generative models are probabilistic, sensitive to prompt formatting, and susceptible to arithmetic errors and hallucinations.
+- Consequently, this system enforces a strict architectural boundary:
+  1. **100% Deterministic Accounting Engine:** All validation gates, double-entry equality checks, COA posting eligibility, FX revaluation calculations, duplicate lifecycles, and journal dispositions (`ACCEPTED`, `REJECTED`, `QUARANTINED`) are executed by deterministic Python code using fixed-scale `Decimal` arithmetic.
+  2. **Bounded Advisory & Narrative Role:** The LLM is restricted to two narrow tasks:
+     - **Task A (Advisory Candidate Ranking):** When an unmapped account is encountered (`JE_ACCOUNT_UNMAPPED`), deterministic algorithms (RapidFuzz and COA hierarchy) generate a pre-approved list of top-5 postable candidates. The LLM ranks only within this fixed enum. Software validation verifies the selected candidate is in the candidate list and postable; any invalid, hallucinated, or low-confidence (<0.60) response is discarded and escalated to human review. Suggestions are strictly advisory.
+     - **Task B (Narrative Explanation):** Generates plain-English explanations for human auditors based on structured, verified context. The LLM output has zero write-back authority to change dispositions or ledger amounts.
 
-### 2.2 Offline-by-Default Operation & Deterministic Mock Engine
-- To ensure immediate, zero-dependency reproducibility in air-gapped auditor environments or CI/CD pipelines without API keys, the prototype defaults to an offline deterministic mock (`AccountingExplanationEngine`).
-- If an enterprise operator configures `GEMINI_API_KEY` and sets `LLM_PROVIDER=gemini`, the system connects to the Google Generative AI API (`gemini-1.5-flash`) operating at `temperature=0` with structured output schemas to enrich audit narratives.
+### 2.2 Pluggable Provider Architecture & Offline-by-Default Operation
+- The runtime uses a unified `LLMProvider` interface supporting `mock`, `gemini`, `anthropic`, and `openai` (controlled via `LLM_PROVIDER` environment variable).
+- **Default Provider:** `MockLLMProvider`, an offline, deterministic mock operating at temperature 0 with zero external network or API key dependencies. This ensures immediate reproducibility in air-gapped CI/CD environments.
+- **Audit Logging:** Every LLM prompt, raw response, model identifier, and code validation result is recorded in `output/run_trace.jsonl` for auditor inspection.
 
 ---
 
-## 3. AI Usage During the Engineering Process
+## 3. Analysis of AI Tool Failures During Development
 
-### 3.1 Planning & Architectural Iteration
-- The implementation specification underwent 11 iterative architectural reviews (v1 through v11) to eliminate all edge-case ambiguities:
-  - Reconciling genuine source data ($825,400.00\text{ EUR}$, rates $1.071/1.095$, delta $\$19,809.60$).
-  - Establishing order-independent in-batch duplicate handling (symmetrical quarantine).
-  - Enforcing non-bypassable hard gates during human approval.
-  - Designing recursive policy fingerprinting with zero omitted fields.
-  - Formalizing atomic unmapped-account mapping and candidate reclassification.
+During early planning and analysis phases, generative AI tools produced multiple factual errors and hallucinations when reading the raw data files. These failures demonstrate why automated financial agents cannot rely on unconstrained AI text comprehension:
 
-### 3.2 Automated Code & Test Generation
-- AI pair programming was utilized to author:
-  - Strongly-typed Pydantic schemas and dataclass models (`src/models.py`, `src/config.py`).
-  - Ingestion, Decimal parsing, and SHA-256 binary hashing (`src/ingest.py`).
-  - Data quality diagnostics and multi-currency reconciliation (`src/dq_checks.py`).
-  - Deterministic adjustments validation engine (`src/journal.py`).
-  - ACID-compliant SQLite review store and HITL service (`src/store.py`, `src/hitl.py`).
-  - Comprehensive automated pytest suite covering 37 test cases (`tests/`).
-  - CLI commands and markdown reporting utilities (`src/cli.py`, `src/audit.py`).
+| Defect / Area | AI Hallucination / Error | Ground Truth in Data Files | Correction Mechanism |
+|---|---|---|---|
+| **Account 6310 Name** | Hallucinated `"Software & IT Services"` | `chart_of_accounts.csv` defines 6310 as `"Travel and Entertainment"`. | Created `src/tools/profile_data.py` to inspect actual CSV text. |
+| **Suspense Account 9999** | Claimed Debit was `"$2,500.00"` | `trial_balance.csv` row 62 contains Debit `"$12,400.00"`. | Programmatic aggregation in `profile_data.py`. |
+| **Adjustment JE-002 Accounts** | Claimed Line 1 used account `6320` | `manual_adjustments.json` uses `6300` (Dr $28,500) and `6310` (Cr $25,000). | JSON parser verification. |
+| **Adjustment JE-005 Accounts** | Claimed Line 2 credited `2110` for `$45,000` | JE-005 Line 1 is Dr `6315` $18,500 and Line 2 is Cr `6310` $18,500. | Direct JSON inspection tool. |
+| **Adjustment JE-008 Amount** | Claimed JE-008 was for `"$35,000.00"` | JE-008 Line 1 is Dr `2170` $320,000.00 and Line 2 is Cr `2170` $320,000.00. | Exact numeric verification in `profile_data.py`. |
+| **GBP Trial Balance Rows** | Claimed GBP was `413,300 across 3 rows` | GBP cash `1110` is `$412,300.00` across exactly **one row**. | CSV row profiling. |
+| **Prior Period Imbalance** | Claimed raw prior gap was `+$2,980,009.80` | Raw debits $35,177,800 vs credits $32,345,000 yield raw gap `+$2,832,800.00`. | Exact decimal summation script. |
+| **Summary Parent Classification** | Classed `3300` (Equity) as an `"expense"` | `3300` is `account_type == "Equity"` with children `3310` and `3320`. | Dynamic account type in `DQ_COA_NON_HEADER_PARENT`. |
+
+### Architectural Lesson Learned
+Generative models frequently "fill in the blanks" from general corporate accounting patterns rather than reading exact file contents. To eliminate documentation and implementation drift, we instituted `src/tools/profile_data.py`, an automated Python profiling utility that extracts ground-truth figures directly from the source CSV and JSON files, guaranteeing that documentation and tests reflect actual data.
+
+---
+
+## 4. AI-Generated Code and Pair-Programming Artifacts
+
+The Antigravity AI pair programming assistant was utilized across the project lifecycle for:
+- Authoring strongly-typed domain schemas (`src/models.py`, `src/config.py`).
+- Implementing the multi-currency data quality checks (`src/dq_checks.py`).
+- Building the deterministic validation engine, period parser, and balance sufficiency rules (`src/journal.py`).
+- Authoring the pluggable LLM provider hierarchy, candidate ranking engine, and run trace logger (`src/llm.py`, `src/resolver.py`).
+- Implementing the SQLite transactional review store and HITL service (`src/store.py`, `src/hitl.py`).
+- Developing the comprehensive pytest regression test suite (`tests/`).
+- Authoring the ground-truth data profiling tool (`src/tools/profile_data.py`).
