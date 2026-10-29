@@ -1,0 +1,66 @@
+{
+  "metadata": {
+    "generated_at": "2026-10-29T08:33:10.743171+00:00",
+    "reviewed_by": "sakshi_rai",
+    "reviewed_date": "2026-10-29",
+    "policy_version": "1.0.0",
+    "policy_fingerprint": "0262d6dee2f11f476e14902369cc09d0f7eaa4f6ab4742dcc5bcda844ed7263a",
+    "source_file_hashes": {
+      "trial_balance.csv": "6a5d38f4a7792e5a749d62ec34be8c2aa29f540ccf3c95caedf3e1f1b5203ca8",
+      "chart_of_accounts.csv": "1139711bd276b2d443ab83b9a6461b3e1f62a26416962b0dcd0e0762028e49bf",
+      "fx_rates.csv": "268c9b9b5a14ea5533e596ed8872f1c3b5515c92a46c9b197a10ef9f909d1893",
+      "prior_period_tb.csv": "aa1439622935eadb08ec1d0911c0c2f207fd9e71d32479326f5714a4c4180595",
+      "manual_adjustments.json": "26fcad0c0c7bda5306efea47e0c73238b2828b5d30afdd1bb0d54bb6a6704a0f"
+    }
+  },
+  "expected_statuses": {
+    "JE-001": {
+      "status": "ACCEPTED",
+      "issue_codes": []
+    },
+    "JE-002": {
+      "status": "REJECTED",
+      "issue_codes": [
+        "JE_UNBALANCED"
+      ]
+    },
+    "JE-003": {
+      "status": "QUARANTINED",
+      "issue_codes": [
+        "JE_FX_MISMATCH"
+      ]
+    },
+    "JE-004": {
+      "status": "ACCEPTED",
+      "issue_codes": []
+    },
+    "JE-005": {
+      "status": "QUARANTINED",
+      "issue_codes": [
+        "JE_ACCOUNT_UNMAPPED"
+      ]
+    },
+    "JE-006": {
+      "status": "ACCEPTED",
+      "issue_codes": []
+    },
+    "JE-007": {
+      "status": "ACCEPTED",
+      "issue_codes": []
+    },
+    "JE-008": {
+      "status": "QUARANTINED",
+      "issue_codes": [
+        "JE_SELF_OFFSETTING"
+      ]
+    },
+    "JE-009": {
+      "status": "ACCEPTED",
+      "issue_codes": []
+    },
+    "JE-010": {
+      "status": "ACCEPTED",
+      "issue_codes": []
+    }
+  }
+}
