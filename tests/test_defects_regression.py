@@ -739,3 +739,141 @@ def test_fix3_dq_checks_all_findings(loaded_tb, loaded_fx, loaded_coa, loaded_pp
     assert "3200" in cf.message or "3300" in cf.message
 
 
+# ==============================================================================
+# FIX 4: Safe LLM Layer, Ranking, Validation, and Run Trace
+# ==============================================================================
+
+def test_llm_hallucinated_code_is_rejected_and_escalated(loaded_coa):
+    """FIX 4: An LLM response returning an account code not in candidate set is rejected and escalated."""
+    from src.llm import AccountingExplanationEngine, MockLLMProvider
+
+    # Provider returning hallucinated account code '9999'
+    mock_hallucinated = MockLLMProvider(
+        mock_response=json.dumps({
+            "selected_code": "9999",
+            "confidence": 0.95,
+            "rationale": "I think suspense account 9999 is great.",
+        })
+    )
+    engine = AccountingExplanationEngine(provider=mock_hallucinated, coa_index=loaded_coa)
+
+    candidates = [
+        {"account_code": "6310", "account_name": "Travel and Entertainment", "score": 90.0},
+        {"account_code": "6300", "account_name": "Marketing and Advertising", "score": 75.0},
+    ]
+
+    res = engine.rank_account_candidates(
+        entry_id="JE-005",
+        unmapped_code="6315",
+        description="Travel booking adjustment",
+        candidates=candidates,
+        other_accounts={"6310"},
+    )
+
+    assert res.is_valid is False
+    assert res.escalated is True
+    assert "hallucination rejected" in res.escalation_reason.lower()
+
+
+def test_llm_low_confidence_result_is_escalated(loaded_coa):
+    """FIX 4: An LLM suggestion with low confidence (< 0.60) is escalated for human review."""
+    from src.llm import AccountingExplanationEngine, MockLLMProvider
+
+    mock_low_conf = MockLLMProvider(
+        mock_response=json.dumps({
+            "selected_code": "6300",
+            "confidence": 0.45,
+            "rationale": "Uncertain mapping suggestion.",
+        })
+    )
+    engine = AccountingExplanationEngine(provider=mock_low_conf, coa_index=loaded_coa)
+
+    candidates = [
+        {"account_code": "6310", "account_name": "Travel and Entertainment", "score": 90.0},
+        {"account_code": "6300", "account_name": "Marketing and Advertising", "score": 75.0},
+    ]
+
+    res = engine.rank_account_candidates(
+        entry_id="JE-005",
+        unmapped_code="6315",
+        description="Ambiguous travel or promo expense",
+        candidates=candidates,
+        other_accounts={"6310"},
+    )
+
+    assert res.is_valid is True
+    assert res.escalated is True
+    assert "low confidence" in res.escalation_reason.lower()
+
+
+def test_llm_self_offsetting_candidate_is_flagged(loaded_coa):
+    """FIX 4: If selected candidate matches other entry lines, self-offsetting warning is flagged."""
+    from src.llm import AccountingExplanationEngine, MockLLMProvider
+
+    mock_provider = MockLLMProvider(
+        mock_response=json.dumps({
+            "selected_code": "6310",
+            "confidence": 0.88,
+            "rationale": "Matches travel classification.",
+        })
+    )
+    engine = AccountingExplanationEngine(provider=mock_provider, coa_index=loaded_coa)
+
+    candidates = [
+        {"account_code": "6310", "account_name": "Travel and Entertainment", "score": 90.0},
+        {"account_code": "6300", "account_name": "Marketing and Advertising", "score": 75.0},
+    ]
+
+    res = engine.rank_account_candidates(
+        entry_id="JE-005",
+        unmapped_code="6315",
+        description="Travel adjustment",
+        candidates=candidates,
+        other_accounts={"6310"},  # Line 2 has 6310, so selecting 6310 causes self-offsetting
+    )
+
+    assert res.is_valid is True
+    assert res.would_cause_self_offsetting is True
+
+
+def test_llm_mock_mode_is_deterministic(loaded_coa):
+    """FIX 4: Default mock mode produces deterministic results without requiring external API keys."""
+    from src.llm import AccountingExplanationEngine
+
+    engine = AccountingExplanationEngine(coa_index=loaded_coa)
+    candidates = [
+        {"account_code": "6310", "account_name": "Travel and Entertainment", "score": 90.0},
+        {"account_code": "6300", "account_name": "Marketing and Advertising", "score": 75.0},
+    ]
+
+    res1 = engine.rank_account_candidates("JE-005", "6315", "Travel adjustment", candidates)
+    res2 = engine.rank_account_candidates("JE-005", "6315", "Travel adjustment", candidates)
+
+    assert res1.selected_code == res2.selected_code
+    assert res1.confidence == res2.confidence
+    assert res1.rationale == res2.rationale
+
+
+def test_llm_trace_events_logged_in_run_trace_jsonl(data_path, tmp_path):
+    """FIX 4: Verify prompt, response, model name, and validation results are logged in run_trace.jsonl."""
+    db_file = tmp_path / "review.db"
+    out_dir = tmp_path / "output"
+
+    res = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res.summary.quarantined_count > 0
+
+    trace_file = out_dir / "run_trace.jsonl"
+    assert trace_file.exists()
+    lines = [json.loads(line) for line in trace_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    llm_events = [l for l in lines if l.get("event") == "LLM_ACCOUNT_MAPPING_RANKING"]
+    assert len(llm_events) >= 1
+    ev = llm_events[0]
+    assert ev["entry_id"] == "JE-005"
+    assert "prompt" in ev
+    assert "response" in ev
+    assert "validation_result" in ev
+    assert ev["model"] == "mock"
+
+
+

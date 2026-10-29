@@ -59,6 +59,10 @@ def write_run_trace_jsonl(
             }
             f.write(json.dumps(dq_event, default=str) + "\n")
 
+        # LLM Trace events (Task A & Task B)
+        for llm_event in getattr(result, "llm_events", []):
+            f.write(json.dumps(llm_event, default=str) + "\n")
+
         # Summary event
         summary_event = {
             "event": "PIPELINE_RUN_COMPLETED",

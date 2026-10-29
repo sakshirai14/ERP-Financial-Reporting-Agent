@@ -25,13 +25,16 @@ class AccountResolver:
         self,
         unmapped_code: str,
         description: str = "",
-        limit: int = 3,
+        limit: int = 5,
+        other_accounts: Optional[set[str]] = None,
     ) -> list[dict[str, Any]]:
         """Suggests closest postable leaf accounts based on code prefix and name similarity.
 
-        Never suggests header accounts or parent accounts.
+        Produces top candidate accounts (default 5). Never suggests header accounts or parent accounts.
+        Flags candidates that would cause self-offsetting journal lines.
         """
         suggestions: list[dict[str, Any]] = []
+        other = other_accounts or set()
 
         # 1. Code similarity match
         code_choices = {acc.account_code: acc for acc in self.postable_accounts}
@@ -50,6 +53,7 @@ class AccountResolver:
                 "score": round(score, 2),
                 "statement": acc.statement,
                 "match_type": "code_similarity",
+                "would_cause_self_offsetting": acc.account_code in other,
             })
 
         # 2. Description similarity match if provided
@@ -70,6 +74,7 @@ class AccountResolver:
                         "score": round(score, 2),
                         "statement": acc.statement,
                         "match_type": "name_similarity",
+                        "would_cause_self_offsetting": acc.account_code in other,
                     })
 
         suggestions.sort(key=lambda x: x["score"], reverse=True)

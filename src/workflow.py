@@ -297,7 +297,7 @@ def run_pipeline(
 
     # 9. Generate narrative explanations and fuzzy suggestions
     resolver = AccountResolver(coa_index)
-    explainer = AccountingExplanationEngine()
+    explainer = AccountingExplanationEngine(coa_index=coa_index)
     explanations: dict[str, str] = {}
 
     for entry in working_entries:
@@ -305,16 +305,33 @@ def run_pipeline(
         if adj.issue_codes:
             top_issue = adj.issue_codes[0]
             suggestions = None
+            ranking_res = None
             if "unmapped_account" in adj.details:
+                other_accounts = {l.account for l in entry.lines if l.account != adj.details["unmapped_account"]}
                 suggestions = resolver.suggest_accounts(
                     adj.details["unmapped_account"],
                     description=entry.description,
+                    limit=5,
+                    other_accounts=other_accounts,
                 )
+                ranking_res = explainer.rank_account_candidates(
+                    entry_id=entry.id,
+                    unmapped_code=adj.details["unmapped_account"],
+                    description=entry.description,
+                    candidates=suggestions,
+                    other_accounts=other_accounts,
+                )
+                adj.details["ai_suggested_account"] = ranking_res.selected_code
+                adj.details["ai_confidence"] = ranking_res.confidence
+                adj.details["ai_escalated"] = ranking_res.escalated
+                adj.details["ai_self_offsetting"] = ranking_res.would_cause_self_offsetting
+
             expl = explainer.explain_issue(
                 entry_id=entry.id,
                 issue_code=top_issue,
                 context=adj.details,
                 suggestions=suggestions,
+                ranking_result=ranking_res,
             )
             explanations[entry.id] = expl
         else:
@@ -346,6 +363,7 @@ def run_pipeline(
         input_file_hashes=file_hashes,
         summary=summary,
         entries=working_entries,
+        llm_events=explainer.trace_events,
     )
 
     # 12. Save Cached Run under effective_cache_key

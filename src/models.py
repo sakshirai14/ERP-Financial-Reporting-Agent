@@ -144,6 +144,7 @@ class PipelineExecutionResult:
     input_file_hashes: dict[str, str]
     summary: ExecutionSummary
     entries: list[JournalEntry] = field(default_factory=list)
+    llm_events: list[dict[str, Any]] = field(default_factory=list)
     is_cached: bool = False
 
 
