@@ -182,3 +182,122 @@ def test_map_account_persistence_failure_rolls_back_cleanly(loaded_coa, default_
     # Verify entry remains with original unmapped account
     entry = store.get_entry("JE-005")
     assert any(line.account == "6315" for line in entry.lines)
+
+
+def test_map_account_actual_je_005_to_6310_quarantines_for_self_offsetting(loaded_coa, default_config, data_path):
+    """Mapping actual JE-005 (Dr 6315 / Cr 6310) to 6310 results in QUARANTINED with JE_SELF_OFFSETTING."""
+    from src.ingest import load_manual_adjustments
+    batch = load_manual_adjustments(data_path / "manual_adjustments.json")
+    je_005 = next(e for e in batch.entries if e.id == "JE-005")
+
+    store = ReviewStore(":memory:")
+    val_res = JournalEntryValidationResult(
+        entry_id="JE-005",
+        disposition=JournalEntryDisposition.QUARANTINED,
+        issue_codes=["JE_ACCOUNT_UNMAPPED"],
+        is_balanced=True,
+        accounts_exist_in_coa=False,
+        accounts_are_postable=True,
+        line_currencies_consistent=True,
+    )
+    store.persist_quarantined_entries([je_005], {"JE-005": val_res})
+
+    service = HITLReviewService(store, loaded_coa, default_config)
+    res = service.map_and_revalidate(
+        entry_id="JE-005",
+        from_account="6315",
+        to_account="6310",
+        reviewer="auditor_jane",
+        notes="Attempt mapping to existing counterparty account 6310",
+    )
+    # Mapping succeeds in updating the account, but entry disposition must be QUARANTINED due to self-offsetting
+    assert res.success is True
+    assert res.disposition == JournalEntryDisposition.QUARANTINED
+
+    # Verify decision stored reflects QUARANTINED and JE_SELF_OFFSETTING
+    dec = store.get_decision("JE-005")
+    assert dec is not None
+    assert dec.disposition == JournalEntryDisposition.QUARANTINED
+    assert "JE_SELF_OFFSETTING" in dec.issue_codes
+
+    # Verify updated entry in review store
+    updated = store.get_entry("JE-005")
+    assert all(l.account == "6310" for l in updated.lines)
+
+
+def test_map_account_actual_je_005_to_6300_accepts(loaded_coa, default_config, data_path):
+    """Mapping actual JE-005 (Dr 6315 / Cr 6310) to valid leaf account 6300 results in ACCEPTED."""
+    from src.ingest import load_manual_adjustments
+    batch = load_manual_adjustments(data_path / "manual_adjustments.json")
+    je_005 = next(e for e in batch.entries if e.id == "JE-005")
+
+    store = ReviewStore(":memory:")
+    val_res = JournalEntryValidationResult(
+        entry_id="JE-005",
+        disposition=JournalEntryDisposition.QUARANTINED,
+        issue_codes=["JE_ACCOUNT_UNMAPPED"],
+        is_balanced=True,
+        accounts_exist_in_coa=False,
+        accounts_are_postable=True,
+        line_currencies_consistent=True,
+    )
+    store.persist_quarantined_entries([je_005], {"JE-005": val_res})
+
+    service = HITLReviewService(store, loaded_coa, default_config)
+    res = service.map_and_revalidate(
+        entry_id="JE-005",
+        from_account="6315",
+        to_account="6300",
+        reviewer="auditor_jane",
+        notes="Mapped travel to marketing 6300",
+    )
+    assert res.success is True
+    assert res.disposition == JournalEntryDisposition.ACCEPTED
+
+    dec = store.get_decision("JE-005")
+    assert dec is not None
+    assert dec.disposition == JournalEntryDisposition.ACCEPTED
+    assert dec.issue_codes == []
+
+
+def test_map_account_to_header_or_parent_refused(loaded_coa, default_config, data_path):
+    """Mapping to non-postable header account (1290) or parent account (6000) is refused."""
+    from src.ingest import load_manual_adjustments
+    batch = load_manual_adjustments(data_path / "manual_adjustments.json")
+    je_005 = next(e for e in batch.entries if e.id == "JE-005")
+
+    store = ReviewStore(":memory:")
+    val_res = JournalEntryValidationResult(
+        entry_id="JE-005",
+        disposition=JournalEntryDisposition.QUARANTINED,
+        issue_codes=["JE_ACCOUNT_UNMAPPED"],
+        is_balanced=True,
+        accounts_exist_in_coa=False,
+        accounts_are_postable=True,
+        line_currencies_consistent=True,
+    )
+    store.persist_quarantined_entries([je_005], {"JE-005": val_res})
+
+    service = HITLReviewService(store, loaded_coa, default_config)
+
+    # 1. Header account 1290
+    res_hdr = service.map_and_revalidate(
+        entry_id="JE-005",
+        from_account="6315",
+        to_account="1290",
+        reviewer="auditor_jane",
+        notes="Try mapping to header",
+    )
+    assert res_hdr.success is False
+    assert "not postable" in res_hdr.error_message
+
+    # 2. Parent account 6000
+    res_parent = service.map_and_revalidate(
+        entry_id="JE-005",
+        from_account="6315",
+        to_account="6000",
+        reviewer="auditor_jane",
+        notes="Try mapping to parent",
+    )
+    assert res_parent.success is False
+    assert "not postable" in res_parent.error_message

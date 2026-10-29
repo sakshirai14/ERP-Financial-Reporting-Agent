@@ -173,6 +173,90 @@ def evaluate_fx_revaluation(
     return None, context
 
 
+def validate_single_entry_full(
+    entry: JournalEntry,
+    coa_index: CoaIndex,
+    tb: list[TbRow],
+    fx_rates: list[FxRateRow],
+    config: ReportingAgentConfig,
+    is_inbatch_duplicate: bool = False,
+    is_prior_accepted: bool = False,
+    duplicate_count: int = 1,
+) -> JournalEntryValidationResult:
+    """Performs complete validation on a single journal entry across all policy gates."""
+    issues: list[str] = []
+    details: dict[str, Any] = {}
+
+    # Symmetrical in-batch duplicate assignment
+    if is_inbatch_duplicate:
+        issues.append("JE_INBATCH_DUPLICATE")
+        details["duplicate_count"] = duplicate_count
+
+    # Prior acceptance advisory (Mechanism C)
+    if is_prior_accepted:
+        issues.append("JE_PRIOR_ACCEPTANCE")
+
+    # Hard structural gates
+    _, hard_issues = validate_single_entry_hard_gates(entry, coa_index, config)
+    issues.extend(hard_issues)
+
+    # Soft COA check: Unmapped account
+    for line in entry.lines:
+        if not coa_index.account_exists(line.account):
+            if "JE_ACCOUNT_PROHIBITED" not in issues and "JE_ACCOUNT_UNMAPPED" not in issues:
+                issues.append("JE_ACCOUNT_UNMAPPED")
+                details["unmapped_account"] = line.account
+
+    # Self-offsetting check (debit and credit hitting the exact same account)
+    if len(entry.lines) >= 2:
+        unique_accounts = {line.account for line in entry.lines}
+        if len(unique_accounts) == 1:
+            issues.append("JE_SELF_OFFSETTING")
+            details["offsetting_account"] = next(iter(unique_accounts))
+
+    # FX Revaluation candidate or confirmed check
+    account_set = {line.account for line in entry.lines}
+    is_fx_candidate = (
+        entry.entry_type in ("fx_revaluation", "fx_candidate") or
+        (entry.entry_type is None and account_set == {config.fx.asset_account_code, config.fx.gain_loss_account_code})
+    )
+
+    if is_fx_candidate:
+        fx_issue, fx_ctx = evaluate_fx_revaluation(entry, config.fx, tb, fx_rates, config)
+        details["fx_context"] = fx_ctx
+        if fx_issue:
+            issues.append(fx_issue)
+
+    # Deduplicate issues while preserving order
+    unique_issues = list(dict.fromkeys(issues))
+
+    # Determine disposition
+    has_hard_failure = any(code in config.hard_validation_gates for code in unique_issues)
+    if has_hard_failure:
+        disposition = JournalEntryDisposition.REJECTED
+    elif unique_issues:
+        disposition = JournalEntryDisposition.QUARANTINED
+    else:
+        disposition = JournalEntryDisposition.ACCEPTED
+
+    # Construct result
+    is_balanced = "JE_UNBALANCED" not in unique_issues
+    accounts_exist = not any(code in ("JE_ACCOUNT_PROHIBITED", "JE_ACCOUNT_UNMAPPED") for code in unique_issues)
+    accounts_postable = not any(code in ("JE_NON_POSTABLE_HEADER", "JE_NON_POSTABLE_PARENT") for code in unique_issues)
+    currencies_consistent = "JE_CURRENCY_METADATA_INCONSISTENT" not in unique_issues
+
+    return JournalEntryValidationResult(
+        entry_id=entry.id,
+        disposition=disposition,
+        issue_codes=unique_issues,
+        is_balanced=is_balanced,
+        accounts_exist_in_coa=accounts_exist,
+        accounts_are_postable=accounts_postable,
+        line_currencies_consistent=currencies_consistent,
+        details=details,
+    )
+
+
 def validate_adjustments_batch(
     entries: list[JournalEntry],
     coa_index: CoaIndex,
@@ -181,15 +265,7 @@ def validate_adjustments_batch(
     config: ReportingAgentConfig,
     prior_accepted_ids: Optional[set[str]] = None,
 ) -> dict[str, JournalEntryValidationResult]:
-    """Validates an entire batch of manual journal adjustments deterministically.
-
-    Implements:
-    - Mechanism B: Order-independent in-batch duplicate handling (symmetrical quarantine)
-    - Mechanism C: Cross-batch repeat submission detection
-    - Chart of Accounts validation and posting eligibility
-    - Self-offsetting entry detection
-    - Structured FX revaluation calculation and direction
-    """
+    """Validates an entire batch of manual journal adjustments deterministically."""
     results: dict[str, JournalEntryValidationResult] = {}
     prior_accepted = prior_accepted_ids or set()
 
@@ -199,76 +275,15 @@ def validate_adjustments_batch(
 
     # Step 2: Validate each entry
     for entry in entries:
-        issues: list[str] = []
-        details: dict[str, Any] = {}
-
-        # Symmetrical in-batch duplicate assignment
-        if entry.id in inbatch_duplicate_ids:
-            issues.append("JE_INBATCH_DUPLICATE")
-            details["duplicate_count"] = id_counts[entry.id]
-
-        # Prior acceptance advisory (Mechanism C)
-        if entry.id in prior_accepted:
-            issues.append("JE_PRIOR_ACCEPTANCE")
-
-        # Hard structural gates
-        _, hard_issues = validate_single_entry_hard_gates(entry, coa_index, config)
-        issues.extend(hard_issues)
-
-        # Soft COA check: Unmapped account
-        for line in entry.lines:
-            if not coa_index.account_exists(line.account):
-                if "JE_ACCOUNT_PROHIBITED" not in issues and "JE_ACCOUNT_UNMAPPED" not in issues:
-                    issues.append("JE_ACCOUNT_UNMAPPED")
-                    details["unmapped_account"] = line.account
-
-        # Self-offsetting check (debit and credit hitting the exact same account)
-        if len(entry.lines) >= 2:
-            unique_accounts = {line.account for line in entry.lines}
-            if len(unique_accounts) == 1:
-                issues.append("JE_SELF_OFFSETTING")
-                details["offsetting_account"] = next(iter(unique_accounts))
-
-        # FX Revaluation candidate or confirmed check
-        account_set = {line.account for line in entry.lines}
-        is_fx_candidate = (
-            entry.entry_type in ("fx_revaluation", "fx_candidate") or
-            (entry.entry_type is None and account_set == {config.fx.asset_account_code, config.fx.gain_loss_account_code})
-        )
-
-        if is_fx_candidate:
-            fx_issue, fx_ctx = evaluate_fx_revaluation(entry, config.fx, tb, fx_rates, config)
-            details["fx_context"] = fx_ctx
-            if fx_issue:
-                issues.append(fx_issue)
-
-        # Deduplicate issues while preserving order
-        unique_issues = list(dict.fromkeys(issues))
-
-        # Determine disposition
-        has_hard_failure = any(code in config.hard_validation_gates for code in unique_issues)
-        if has_hard_failure:
-            disposition = JournalEntryDisposition.REJECTED
-        elif unique_issues:
-            disposition = JournalEntryDisposition.QUARANTINED
-        else:
-            disposition = JournalEntryDisposition.ACCEPTED
-
-        # Construct result
-        is_balanced = "JE_UNBALANCED" not in unique_issues
-        accounts_exist = not any(code in ("JE_ACCOUNT_PROHIBITED", "JE_ACCOUNT_UNMAPPED") for code in unique_issues)
-        accounts_postable = not any(code in ("JE_NON_POSTABLE_HEADER", "JE_NON_POSTABLE_PARENT") for code in unique_issues)
-        currencies_consistent = "JE_CURRENCY_METADATA_INCONSISTENT" not in unique_issues
-
-        results[entry.id] = JournalEntryValidationResult(
-            entry_id=entry.id,
-            disposition=disposition,
-            issue_codes=unique_issues,
-            is_balanced=is_balanced,
-            accounts_exist_in_coa=accounts_exist,
-            accounts_are_postable=accounts_postable,
-            line_currencies_consistent=currencies_consistent,
-            details=details,
+        results[entry.id] = validate_single_entry_full(
+            entry=entry,
+            coa_index=coa_index,
+            tb=tb,
+            fx_rates=fx_rates,
+            config=config,
+            is_inbatch_duplicate=(entry.id in inbatch_duplicate_ids),
+            is_prior_accepted=(entry.id in prior_accepted),
+            duplicate_count=id_counts.get(entry.id, 1),
         )
 
     return results

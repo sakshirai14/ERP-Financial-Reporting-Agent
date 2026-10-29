@@ -8,7 +8,7 @@ from typing import Any, Optional
 from src.config import ReportingAgentConfig, compute_policy_fingerprint
 from src.dq_checks import check_posting_eligibility
 from src.ingest import CoaIndex, parse_decimal
-from src.journal import evaluate_fx_revaluation, validate_single_entry_hard_gates
+from src.journal import evaluate_fx_revaluation, validate_single_entry_full, validate_single_entry_hard_gates
 from src.models import (
     FxRateRow,
     JournalEntry,
@@ -49,6 +49,8 @@ class HITLReviewService:
 
         Cannot approve entries with hard validation failures, unmapped accounts,
         in-batch duplicate conflicts, or FX revaluation calculation discrepancies.
+        Approval is only allowed if the remaining issue codes are a subset of
+        reviewable advisories and no new issues have emerged since the entry was reviewed.
         """
         if not reviewer or not reviewer.strip():
             return ReviewOperationResult(success=False, error_message="Reviewer identity is required.")
@@ -59,47 +61,53 @@ class HITLReviewService:
         if not target_entry:
             return ReviewOperationResult(success=False, error_message=f"Entry {entry_id} not found.")
 
-        # 1. Hard validation pre-flight check
-        is_valid, hard_issues = validate_single_entry_hard_gates(target_entry, self.coa, self.config)
-        if not is_valid:
+        # 1. Fetch quarantined record to determine what issues reviewer was shown
+        q_rec = self.store.get_quarantined_record(entry_id)
+        seen_issues = set(q_rec["issue_codes"]) if q_rec else set()
+
+        # 2. Run full revalidation across all policy gates
+        val_res = validate_single_entry_full(
+            entry=target_entry,
+            coa_index=self.coa,
+            tb=self.tb,
+            fx_rates=self.fx_rates,
+            config=self.config,
+        )
+
+        current_issues = set(val_res.issue_codes)
+        reviewable_advisories = {"JE_SELF_OFFSETTING", "JE_PRIOR_ACCEPTANCE"}
+
+        # 3. Guard against hard failures
+        if val_res.disposition == JournalEntryDisposition.REJECTED or any(code in self.config.hard_validation_gates for code in current_issues):
+            hard_detected = [c for c in current_issues if c in self.config.hard_validation_gates]
             return ReviewOperationResult(
                 success=False,
                 error_message=(
-                    f"Cannot approve entry {entry_id}: contains hard validation failures ({hard_issues}). "
+                    f"Cannot approve entry {entry_id}: contains hard validation failures ({hard_detected or val_res.issue_codes}). "
                     "Hard failures require correction and revalidation, not an approval override."
                 ),
             )
 
-        # 2. Check for unmapped accounts (requires map-account first)
-        unmapped_accounts = [
-            line.account for line in target_entry.lines if not self.coa.account_exists(line.account)
-        ]
-        if unmapped_accounts:
+        # 4. Guard against non-reviewable advisories (e.g. FX mismatch, unmapped account)
+        non_advisories = current_issues - reviewable_advisories
+        if non_advisories:
             return ReviewOperationResult(
                 success=False,
                 error_message=(
-                    f"Cannot approve entry {entry_id}: account(s) {unmapped_accounts} remain unmapped. "
-                    "Must execute map-account before approval."
+                    f"Cannot approve entry {entry_id}: contains non-reviewable issue(s) {sorted(list(non_advisories))}. "
+                    "Only reviewable advisories (e.g. JE_SELF_OFFSETTING, JE_PRIOR_ACCEPTANCE) may be approved."
                 ),
             )
 
-        # 3. Full FX policy revalidation (calculation and direction)
-        account_set = {line.account for line in target_entry.lines}
-        is_fx_candidate = (
-            target_entry.entry_type == "fx_revaluation" or
-            (target_entry.entry_type is None and account_set == {self.config.fx.asset_account_code, self.config.fx.gain_loss_account_code})
-        )
-        if is_fx_candidate and self.tb and self.fx_rates:
-            fx_issue, fx_ctx = evaluate_fx_revaluation(target_entry, self.config.fx, self.tb, self.fx_rates, self.config)
-            if fx_issue:
-                return ReviewOperationResult(
-                    success=False,
-                    error_message=(
-                        f"Cannot approve entry {entry_id}: contains unresolved FX policy failure ({fx_issue}). "
-                        "FX calculation and direction discrepancies cannot be cleared by approving the unchanged entry. "
-                        "Entry must be corrected, resubmitted, or reclassified via the explicit reclassification workflow."
-                    ),
-                )
+        # 5. Guard against new issues not seen during initial review
+        if seen_issues and not current_issues.issubset(seen_issues):
+            new_issues = current_issues - seen_issues
+            return ReviewOperationResult(
+                success=False,
+                error_message=(
+                    f"Cannot approve entry {entry_id}: detected new issue(s) {sorted(list(new_issues))} not present during initial review."
+                ),
+            )
 
         fingerprint = compute_policy_fingerprint(self.config)
         self.store.record_decision(
@@ -108,7 +116,7 @@ class HITLReviewService:
             reviewer=reviewer.strip(),
             notes=notes.strip(),
             policy_fingerprint=fingerprint,
-            issue_codes=[],
+            issue_codes=sorted(list(current_issues)),
             updated_entry=target_entry,
         )
 
@@ -156,7 +164,7 @@ class HITLReviewService:
         notes: str,
         entry: Optional[JournalEntry] = None,
     ) -> ReviewOperationResult:
-        """Atomically maps an unmapped account, reruns all hard gates, and persists to store."""
+        """Atomically maps an unmapped account, reruns full validation, and persists to store."""
         # 1. Pre-condition checks: Reviewer and notes non-empty
         if not reviewer or not reviewer.strip():
             return ReviewOperationResult(success=False, error_message="Reviewer identity is required.")
@@ -213,12 +221,20 @@ class HITLReviewService:
             source_currency=target_entry.source_currency,
         )
 
-        # 5. In-Memory Hard Gate Revalidation on Candidate Entry
-        is_valid, hard_issues = validate_single_entry_hard_gates(candidate_entry, self.coa, self.config)
-        if not is_valid:
+        # 5. Full in-memory revalidation across all policy gates
+        full_val = validate_single_entry_full(
+            entry=candidate_entry,
+            coa_index=self.coa,
+            tb=self.tb,
+            fx_rates=self.fx_rates,
+            config=self.config,
+        )
+
+        # If candidate entry suffers a hard failure, mapping cannot be accepted
+        if full_val.disposition == JournalEntryDisposition.REJECTED:
             return ReviewOperationResult(
                 success=False,
-                error_message=f"Candidate entry failed hard validation after mapping: {hard_issues}",
+                error_message=f"Candidate entry failed hard validation after mapping: {full_val.issue_codes}",
             )
 
         # 6. Atomic Persistence in SQLite Transaction (verifies state inside transaction)
@@ -230,15 +246,15 @@ class HITLReviewService:
                 mapped_account=to_account,
                 reviewer=reviewer.strip(),
                 notes=notes.strip(),
-                new_disposition=JournalEntryDisposition.ACCEPTED,
-                revalidation_result=candidate_entry,
+                new_disposition=full_val.disposition,
+                revalidation_result=full_val,
                 policy_fingerprint=fingerprint,
                 updated_entry=candidate_entry,
             )
             audit_rec = self.store.get_decision(entry_id)
             return ReviewOperationResult(
                 success=True,
-                disposition=JournalEntryDisposition.ACCEPTED,
+                disposition=full_val.disposition,
                 audit_entry=audit_rec,
             )
         except Exception as e:
@@ -255,7 +271,7 @@ class HITLReviewService:
         notes: str,
         entry: Optional[JournalEntry] = None,
     ) -> ReviewOperationResult:
-        """Reclassifies an FX candidate as standard_adjustment and reruns hard gates."""
+        """Reclassifies an FX candidate as standard_adjustment and reruns full validation."""
         if not reviewer or not reviewer.strip():
             return ReviewOperationResult(success=False, error_message="Reviewer identity is required.")
         if not notes or not notes.strip():
@@ -276,29 +292,35 @@ class HITLReviewService:
             source_currency=target_entry.source_currency,
         )
 
-        # Standard hard gate revalidation (must never bypass hard gates)
-        is_valid, hard_issues = validate_single_entry_hard_gates(candidate_entry, self.coa, self.config)
-        if not is_valid:
+        # Full revalidation across all policy gates
+        full_val = validate_single_entry_full(
+            entry=candidate_entry,
+            coa_index=self.coa,
+            tb=self.tb,
+            fx_rates=self.fx_rates,
+            config=self.config,
+        )
+        if full_val.disposition == JournalEntryDisposition.REJECTED:
             return ReviewOperationResult(
                 success=False,
-                error_message=f"Reclassified entry failed standard hard validation: {hard_issues}",
+                error_message=f"Reclassified entry failed validation: {full_val.issue_codes}",
             )
 
         fingerprint = compute_policy_fingerprint(self.config)
         self.store.record_decision(
             entry_id=entry_id,
-            disposition=JournalEntryDisposition.ACCEPTED,
+            disposition=full_val.disposition,
             reviewer=reviewer.strip(),
             notes=notes.strip(),
             policy_fingerprint=fingerprint,
             prior_classification=target_entry.entry_type or "candidate_fx",
             new_classification=classification,
-            issue_codes=[],
+            issue_codes=full_val.issue_codes,
             updated_entry=candidate_entry,
         )
         audit_rec = self.store.get_decision(entry_id)
         return ReviewOperationResult(
             success=True,
-            disposition=JournalEntryDisposition.ACCEPTED,
+            disposition=full_val.disposition,
             audit_entry=audit_rec,
         )

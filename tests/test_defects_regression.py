@@ -106,7 +106,7 @@ def test_fx_reclassification_explicit_audited_workflow(loaded_coa, default_confi
         entry_type="fx_candidate",
         lines=[
             JournalLine(account="1110", debit=Decimal("10000.00"), credit=Decimal("0.00")),
-            JournalLine(account="7110", debit=Decimal("0.00"), credit=Decimal("10000.00")),
+            JournalLine(account="7310", debit=Decimal("0.00"), credit=Decimal("10000.00")),
         ],
     )
     val_res = JournalEntryValidationResult(
@@ -222,7 +222,7 @@ def test_persisted_account_mapping_je_005_and_raw_file_immutability(tmp_path, da
     res1 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
     assert res1.adjustments["JE-005"].disposition == JournalEntryDisposition.QUARANTINED
 
-    # Human maps account 6315 -> 6310
+    # Human maps account 6315 -> 6300 (Marketing & Advertising, clean leaf account)
     config = ReportingAgentConfig()
     coa = CoaIndex(load_chart_of_accounts(data_path / "chart_of_accounts.csv"))
     store = ReviewStore(db_file)
@@ -230,9 +230,9 @@ def test_persisted_account_mapping_je_005_and_raw_file_immutability(tmp_path, da
     res_map = service.map_and_revalidate(
         entry_id="JE-005",
         from_account="6315",
-        to_account="6310",
+        to_account="6300",
         reviewer="auditor_jane",
-        notes="Mapped software subscription to 6310 IT Expense",
+        notes="Mapped travel to marketing expense 6300",
     )
     assert res_map.success is True
     assert res_map.disposition == JournalEntryDisposition.ACCEPTED

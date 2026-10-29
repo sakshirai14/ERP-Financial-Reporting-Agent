@@ -240,7 +240,11 @@ def run_pipeline(
             cur_adj = adjustments[entry_id]
             # If human reviewer approved an advisory and hard gates still pass
             if overlay["disposition"] == JournalEntryDisposition.ACCEPTED:
-                if cur_adj.is_balanced and cur_adj.accounts_exist_in_coa and cur_adj.accounts_are_postable and cur_adj.line_currencies_consistent:
+                approved_codes = set(overlay.get("issue_codes", []))
+                reviewable_advisories = {"JE_SELF_OFFSETTING", "JE_PRIOR_ACCEPTANCE"}
+                cur_issues = set(cur_adj.issue_codes)
+                has_hard_fail = any(code in cfg.hard_validation_gates for code in cur_issues)
+                if not has_hard_fail and (cur_issues.issubset(approved_codes | reviewable_advisories) or not cur_issues):
                     adjustments[entry_id] = JournalEntryValidationResult(
                         entry_id=entry_id,
                         disposition=JournalEntryDisposition.ACCEPTED,
@@ -249,8 +253,29 @@ def run_pipeline(
                         accounts_exist_in_coa=cur_adj.accounts_exist_in_coa,
                         accounts_are_postable=cur_adj.accounts_are_postable,
                         line_currencies_consistent=cur_adj.line_currencies_consistent,
-                        details={**cur_adj.details, "reviewed_by": overlay["reviewer"], "notes": overlay["notes"]},
+                        details={
+                            **cur_adj.details,
+                            "reviewed_by": overlay["reviewer"],
+                            "notes": overlay["notes"],
+                            "original_issues": list(cur_issues or approved_codes),
+                        },
                     )
+            elif overlay["disposition"] == JournalEntryDisposition.QUARANTINED:
+                adjustments[entry_id] = JournalEntryValidationResult(
+                    entry_id=entry_id,
+                    disposition=JournalEntryDisposition.QUARANTINED,
+                    issue_codes=cur_adj.issue_codes,
+                    is_balanced=cur_adj.is_balanced,
+                    accounts_exist_in_coa=cur_adj.accounts_exist_in_coa,
+                    accounts_are_postable=cur_adj.accounts_are_postable,
+                    line_currencies_consistent=cur_adj.line_currencies_consistent,
+                    details={
+                        **cur_adj.details,
+                        "reviewed_by": overlay["reviewer"],
+                        "notes": overlay["notes"],
+                        "mapped_account": overlay.get("mapped_account"),
+                    },
+                )
             elif overlay["disposition"] == JournalEntryDisposition.REJECTED:
                 adjustments[entry_id] = JournalEntryValidationResult(
                     entry_id=entry_id,

@@ -151,6 +151,22 @@ class ReviewStore:
             source_currency=data.get("source_currency"),
         )
 
+    def get_quarantined_record(self, entry_id: str) -> Optional[dict[str, Any]]:
+        """Retrieves raw quarantined entry record including issue codes and disposition."""
+        cursor = self._conn.execute(
+            "SELECT entry_json, issue_codes_json, disposition, timestamp FROM quarantined_entries WHERE entry_id = ?",
+            (entry_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return None
+        return {
+            "entry_json": json.loads(row["entry_json"]),
+            "issue_codes": json.loads(row["issue_codes_json"]),
+            "disposition": row["disposition"],
+            "timestamp": row["timestamp"],
+        }
+
     def get_decision(self, entry_id: str) -> Optional[ReviewDecisionRecord]:
         """Fetches the most recent decision record for an entry."""
         cursor = self._conn.execute(
@@ -353,13 +369,14 @@ class ReviewStore:
             # 3. Update quarantined entry state
             if updated_entry:
                 entry_dict = updated_entry.model_dump(mode="json")
+                issues_json = json.dumps(getattr(revalidation_result, "issue_codes", []))
                 self._conn.execute(
                     """
                     UPDATE quarantined_entries
-                    SET entry_json = ?, disposition = ?, issue_codes_json = '[]', timestamp = ?
+                    SET entry_json = ?, disposition = ?, issue_codes_json = ?, timestamp = ?
                     WHERE entry_id = ?
                     """,
-                    (json.dumps(entry_dict), new_disposition.value, now, entry_id),
+                    (json.dumps(entry_dict), new_disposition.value, issues_json, now, entry_id),
                 )
 
     def record_decision(
