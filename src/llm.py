@@ -52,21 +52,63 @@ class MockLLMProvider(LLMProvider):
 
         # Check if ranking prompt
         if "RANK_CANDIDATE_ACCOUNTS" in prompt or "candidates:" in prompt.lower():
-            # Extract candidate codes from prompt
             lines = prompt.splitlines()
-            candidates = []
+            parsed_candidates = []
             for line in lines:
                 if line.strip().startswith("- Candidate:"):
-                    parts = line.strip().split()
-                    if len(parts) >= 3:
-                        candidates.append(parts[2].strip(":,()"))
+                    # Format: - Candidate: 6310 | Name: Travel and Entertainment | RapidFuzz Score: 88.89 | Self-Offsetting: True
+                    try:
+                        parts = [p.strip() for p in line.strip().split("|")]
+                        code = parts[0].replace("- Candidate:", "").strip()
+                        name = parts[1].replace("Name:", "").strip() if len(parts) > 1 else code
+                        score_str = parts[2].replace("RapidFuzz Score:", "").strip() if len(parts) > 2 else "0"
+                        score = float(score_str)
+                        self_offsetting = False
+                        if len(parts) > 3:
+                            self_offsetting = "true" in parts[3].lower()
+                        parsed_candidates.append({
+                            "code": code,
+                            "name": name,
+                            "score": score,
+                            "self_offsetting": self_offsetting,
+                        })
+                    except Exception:
+                        pass
 
-            chosen_code = candidates[0] if candidates else "6310"
-            return json.dumps({
-                "selected_code": chosen_code,
-                "confidence": 0.88,
-                "rationale": f"Selected account {chosen_code} as the closest matching active COA account for this transaction.",
-            })
+            if not parsed_candidates:
+                return json.dumps({
+                    "selected_code": "6300",
+                    "confidence": 0.50,
+                    "rationale": "Default candidate selected due to missing candidate list.",
+                })
+
+            # Sort candidates by score descending
+            sorted_by_score = sorted(parsed_candidates, key=lambda c: c["score"], reverse=True)
+            non_offsetting = [c for c in sorted_by_score if not c["self_offsetting"]]
+
+            if non_offsetting:
+                chosen = non_offsetting[0]
+                runner_up = non_offsetting[1] if len(non_offsetting) > 1 else None
+                if runner_up:
+                    margin = max(0.0, chosen["score"] - runner_up["score"])
+                    confidence = round(min(0.95, max(0.60, (chosen["score"] * 0.75 + margin * 0.5) / 100.0)), 2)
+                    rationale = f"Selected {chosen['code']} ({chosen['name']}) with score {chosen['score']:.1f} over {runner_up['code']} ({runner_up['name']}) while avoiding self-offsetting."
+                else:
+                    confidence = round(min(0.95, max(0.60, chosen["score"] / 100.0)), 2)
+                    rationale = f"Selected {chosen['code']} ({chosen['name']}) with score {chosen['score']:.1f} as the sole viable non-self-offsetting candidate."
+                return json.dumps({
+                    "selected_code": chosen["code"],
+                    "confidence": confidence,
+                    "rationale": rationale,
+                })
+            else:
+                # Every candidate causes self-offsetting! Return low confidence (< 0.60) so it escalates
+                chosen = sorted_by_score[0]
+                return json.dumps({
+                    "selected_code": chosen["code"],
+                    "confidence": 0.40,
+                    "rationale": f"All candidate accounts including {chosen['code']} ({chosen['name']}) cause self-offsetting postings; escalated for human review.",
+                })
 
         return json.dumps({
             "message": "Deterministic mock explanation.",

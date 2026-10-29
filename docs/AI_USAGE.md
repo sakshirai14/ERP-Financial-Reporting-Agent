@@ -19,7 +19,8 @@ In enterprise financial reporting, generative AI models must **never** make auth
 
 ### 2.2 Pluggable Provider Architecture & Offline-by-Default Operation
 - The runtime uses a unified `LLMProvider` interface supporting `mock`, `gemini`, `anthropic`, and `openai` (controlled via `LLM_PROVIDER` environment variable).
-- **Default Provider:** `MockLLMProvider`, an offline, deterministic mock operating at temperature 0 with zero external network or API key dependencies. This ensures immediate reproducibility in air-gapped CI/CD environments.
+- **Default Provider:** `MockLLMProvider`, an offline, deterministic mock operating at temperature 0 with zero external network or API key dependencies. This ensures immediate reproducibility in air-gapped CI/CD environments. Note: The `gemini`, `openai`, and `anthropic` providers are implemented for production readiness but remain untested in CI without live API keys.
+- **Task B Explanations are Template-Based by Design:** Audit narrative generation uses verified structured context with deterministic template formatting. The LLM is strictly prohibited from deciding or altering journal dispositions.
 - **Audit Logging:** Every LLM prompt, raw response, model identifier, and code validation result is recorded in `output/run_trace.jsonl` for auditor inspection.
 
 ---

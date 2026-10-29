@@ -876,4 +876,80 @@ def test_llm_trace_events_logged_in_run_trace_jsonl(data_path, tmp_path):
     assert ev["model"] == "mock"
 
 
+def test_je005_mock_suggestion_is_not_6310(loaded_coa):
+    """FIX 4 Amendment: Mock provider chooses highest non-self-offsetting candidate (6300, NOT 6310)."""
+    from src.llm import AccountingExplanationEngine
+
+    engine = AccountingExplanationEngine(coa_index=loaded_coa)
+    candidates = [
+        {"account_code": "6310", "account_name": "Travel and Entertainment", "score": 88.89},
+        {"account_code": "6300", "account_name": "Marketing and Advertising", "score": 75.0},
+        {"account_code": "6230", "account_name": "Office Supplies", "score": 50.0},
+    ]
+
+    res = engine.rank_account_candidates(
+        entry_id="JE-005",
+        unmapped_code="6315",
+        description="Software subscription reclassification",
+        candidates=candidates,
+        other_accounts={"6310"},  # Line 2 has 6310
+    )
+
+    assert res.is_valid is True
+    assert res.selected_code == "6300"
+    assert res.selected_code != "6310"
+    assert res.would_cause_self_offsetting is False
+    assert "Marketing and Advertising" in res.rationale
+
+
+def test_mock_confidence_varies_with_candidates(loaded_coa):
+    """FIX 4 Amendment: Confidence varies based on candidate score and margin, not a hardcoded constant."""
+    from src.llm import AccountingExplanationEngine
+
+    engine = AccountingExplanationEngine(coa_index=loaded_coa)
+
+    # High margin set: 92 vs 50 -> high confidence
+    candidates_wide = [
+        {"account_code": "6300", "account_name": "Marketing and Advertising", "score": 92.0},
+        {"account_code": "6230", "account_name": "Office Supplies", "score": 50.0},
+    ]
+    res_wide = engine.rank_account_candidates("JE-005", "6315", "Desc", candidates_wide)
+
+    # Tight margin set: 70 vs 68 -> lower confidence
+    candidates_tight = [
+        {"account_code": "6300", "account_name": "Marketing and Advertising", "score": 70.0},
+        {"account_code": "6230", "account_name": "Office Supplies", "score": 68.0},
+    ]
+    res_tight = engine.rank_account_candidates("JE-005", "6315", "Desc", candidates_tight)
+
+    assert res_wide.confidence > res_tight.confidence
+    assert res_wide.confidence != 0.88
+    assert res_tight.confidence != 0.88
+
+
+def test_all_self_offsetting_candidates_escalates(loaded_coa):
+    """FIX 4 Amendment: If every candidate causes self-offsetting, return low confidence (<0.60) so it escalates."""
+    from src.llm import AccountingExplanationEngine
+
+    engine = AccountingExplanationEngine(coa_index=loaded_coa)
+    candidates = [
+        {"account_code": "6310", "account_name": "Travel and Entertainment", "score": 88.89},
+        {"account_code": "2170", "account_name": "Intercompany Clearing", "score": 70.0},
+    ]
+
+    res = engine.rank_account_candidates(
+        entry_id="JE-005",
+        unmapped_code="6315",
+        description="Software subscription reclassification",
+        candidates=candidates,
+        other_accounts={"6310", "2170"},  # Both candidates cause self-offsetting!
+    )
+
+    assert res.is_valid is True
+    assert res.escalated is True
+    assert res.confidence < 0.60
+    assert "escalated" in res.rationale.lower()
+
+
+
 
