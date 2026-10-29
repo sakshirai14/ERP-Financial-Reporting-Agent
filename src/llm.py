@@ -107,4 +107,24 @@ class AccountingExplanationEngine:
                 "Summary accounts cannot receive journal postings."
             )
 
+        if issue_code == "JE_DATE_OUT_OF_PERIOD":
+            date_err = ctx.get("date_error", {})
+            entry_date = date_err.get("entry_date") or ctx.get("entry_date", "the entry date")
+            period = date_err.get("batch_period") or ctx.get("period", "2024-Q4")
+            return (
+                f"Entry {entry_id} has date {entry_date}, which falls outside the active accounting period {period}. "
+                "Quarantined for period assignment verification."
+            )
+
+        if issue_code == "JE_EXCEEDS_BALANCE":
+            bal_err = ctx.get("balance_sufficiency_error", {})
+            acc = bal_err.get("account") or ctx.get("account", "target account")
+            against_amt = bal_err.get("against_amount") or ctx.get("against_amount", "adjustment amount")
+            tb_bal = bal_err.get("tb_balance") or ctx.get("tb_balance", "current balance")
+            return (
+                f"Entry {entry_id} posts an adjustment of ${against_amt} against the normal balance of account {acc}, "
+                f"which exceeds its current ledger balance of ${tb_bal}. "
+                "Quarantined to prevent negative ledger balances."
+            )
+
         return f"Entry {entry_id} triggered accounting validation issue {issue_code}. Quarantined for review."

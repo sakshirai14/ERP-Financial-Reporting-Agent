@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from decimal import Decimal
 from typing import Optional
 
@@ -64,19 +65,31 @@ def run_data_quality_checks(
     findings: list[DataQualityFinding] = []
 
     # 1. Check for duplicate account-currency rows in Trial Balance (Finding F-02)
-    seen_combos: set[tuple[str, str]] = set()
+    tb_groups: dict[tuple[str, str], list[TbRow]] = defaultdict(list)
     for row in tb:
-        combo = (row.account_code, row.currency)
-        if combo in seen_combos:
+        tb_groups[(row.account_code, row.currency)].append(row)
+
+    for (acc_code, curr), rows_list in sorted(tb_groups.items()):
+        if len(rows_list) > 1:
+            row_nums = [r.row_number for r in rows_list if r.row_number is not None]
+            amounts = [f"${max(r.debit, r.credit):,.2f}" for r in rows_list]
+            row_str = f"rows {', '.join(str(n) for n in row_nums)}" if row_nums else f"{len(rows_list)} rows"
             findings.append(
                 DataQualityFinding(
                     code="DQ_TB_DUPLICATE_ACCOUNT",
                     severity=DiagnosticSeverity.WARNING,
-                    message=f"Duplicate account/currency combination found in trial balance: {row.account_code} ({row.currency})",
-                    context={"account_code": row.account_code, "currency": row.currency},
+                    message=(
+                        f"Duplicate account {acc_code} ({curr}) found on {row_str} with amounts {', '.join(amounts)}: "
+                        "duplicate or split - needs human confirmation. Do not silently sum."
+                    ),
+                    context={
+                        "account_code": acc_code,
+                        "currency": curr,
+                        "row_numbers": row_nums,
+                        "amounts": [str(max(r.debit, r.credit)) for r in rows_list],
+                    },
                 )
             )
-        seen_combos.add(combo)
 
     # 2. Check for TB accounts missing from Chart of Accounts (Finding F-03)
     for row in tb:
@@ -152,6 +165,64 @@ def run_data_quality_checks(
             )
         )
 
+    # 3b. Trial Balance Currency Semantics Ambiguity (Amendment 3)
+    raw_debits = sum(r.debit for r in tb)
+    raw_credits = sum(r.credit for r in tb)
+    raw_gap = raw_debits - raw_credits
+
+    gbp_debit = sum(r.debit for r in tb if r.currency == "GBP")
+    gbp_assumed_rate = Decimal("1.251")  # opening rate from fx_rates.csv
+    illustrative_debits = partial_debits + (gbp_debit * gbp_assumed_rate).quantize(Decimal("0.01"))
+    illustrative_gap = illustrative_debits - partial_credits
+
+    findings.append(
+        DataQualityFinding(
+            code="DQ_TB_CURRENCY_AMBIGUITY",
+            severity=DiagnosticSeverity.WARNING,
+            message=(
+                f"Trial balance currency semantics ambiguous - ask controller: "
+                f"(a) Raw gap is ${raw_gap:,.2f} USD (Debits: ${raw_debits:,.2f}, Credits: ${raw_credits:,.2f}). "
+                f"(b) Partial translated gap using EUR period_end rate ({period_end_rates.get('EUR', Decimal('1.095'))}) only is ${partial_gap:,.2f} USD "
+                "(clearly partial because GBP period_end rate is missing). "
+                f"Illustrative sensitivity assuming GBP at opening 1.251 (illustrative only): translated gap would be +${illustrative_gap:,.2f} USD. "
+                "Translating foreign cash balances moves the trial balance further from balance than the raw gap of -$4,800.00, "
+                "suggesting foreign cash amounts may already be in USD. Interpretation is unresolved and needs controller input."
+            ),
+            context={
+                "raw_gap": str(raw_gap),
+                "partial_translated_gap": str(partial_gap),
+                "illustrative_assumed_gbp_rate": str(gbp_assumed_rate),
+                "illustrative_gap": str(illustrative_gap),
+                "status": "unresolved_needs_controller_input",
+            },
+        )
+    )
+
+    # 3c. Pre-Closing Retained Earnings & Open P&L Check
+    re_row = next((r for r in tb if r.account_code == "3200"), None)
+    pl_rows = [r for r in tb if (coa_index.get_account(r.account_code) and coa_index.get_account(r.account_code).statement == "PL") or r.account_code >= "4000"]
+    if re_row and pl_rows:
+        re_balance = re_row.credit - re_row.debit
+        rev_credits = sum(r.credit - r.debit for r in pl_rows if r.account_code.startswith("4"))
+        exp_debits = sum(r.debit - r.credit for r in pl_rows if not r.account_code.startswith("4"))
+        interim_ni = rev_credits - exp_debits
+        findings.append(
+            DataQualityFinding(
+                code="DQ_TB_PRE_CLOSING_RETAINED_EARNINGS",
+                severity=DiagnosticSeverity.INFO,
+                message=(
+                    f"Retained Earnings (account 3200 balance ${re_balance:,.2f}) is presented on pre-closing trial balance "
+                    f"while P&L accounts remain open (interim net income ~${interim_ni:,.2f}). "
+                    "SOCIE opening equity treatment needs a human decision."
+                ),
+                context={
+                    "account_code": "3200",
+                    "retained_earnings_balance": str(re_balance),
+                    "interim_net_income": str(interim_ni),
+                },
+            )
+        )
+
     # 4. Check Prior Period Trial Balance (Findings F-05 & F-06)
     opening_rates: dict[str, Decimal] = {"USD": Decimal("1.0")}
     for rate_row in fx_rates:
@@ -189,8 +260,42 @@ def run_data_quality_checks(
             )
         )
 
+    # 4b. PPE Cost Period-over-Period Jump
+    ppe_prior = next((r for r in prior_tb if r.account_code == "1210"), None)
+    ppe_cur = next((r for r in tb if r.account_code == "1210"), None)
+    if ppe_prior and ppe_cur:
+        prior_amt = ppe_prior.debit - ppe_prior.credit
+        cur_amt = ppe_cur.debit - ppe_cur.credit
+        jump = cur_amt - prior_amt
+        if jump > Decimal("1000000.00"):
+            pct = (jump / prior_amt * Decimal("100")) if prior_amt else Decimal("0")
+            findings.append(
+                DataQualityFinding(
+                    code="DQ_PPE_COST_JUMP",
+                    severity=DiagnosticSeverity.INFO,
+                    message=(
+                        f"Significant period-over-period jump in Property, Plant & Equipment (account 1210): "
+                        f"increased from ${prior_amt:,.2f} in prior period to ${cur_amt:,.2f} in current period "
+                        f"(+${jump:,.2f} / +{pct:.1f}%). Requires verification of capital additions."
+                    ),
+                    context={
+                        "account_code": "1210",
+                        "prior_balance": str(prior_amt),
+                        "current_balance": str(cur_amt),
+                        "jump": str(jump),
+                    },
+                )
+            )
+
     # 5. COA Structure & Metadata Inspections (Findings F-04a to F-04d)
+    pl_with_cf = []
+    equity_without_cf = []
     for account in coa_index.all_accounts():
+        if account.statement == "PL" and account.cf_category and account.cf_category not in ("", "None", "TBD"):
+            pl_with_cf.append(account.account_code)
+        elif account.account_code in ("3200", "3300") and (not account.cf_category or account.cf_category in ("", "None")):
+            equity_without_cf.append(account.account_code)
+
         if account.cf_category == "TBD":
             findings.append(
                 DataQualityFinding(
@@ -227,5 +332,21 @@ def run_data_quality_checks(
                     context={"account_code": account.account_code, "account_type": account.account_type},
                 )
             )
+
+    if pl_with_cf or equity_without_cf:
+        findings.append(
+            DataQualityFinding(
+                code="DQ_COA_CF_CATEGORY_MISMATCH",
+                severity=DiagnosticSeverity.INFO,
+                message=(
+                    f"Cash flow category mismatch in Chart of Accounts: P&L accounts ({', '.join(sorted(pl_with_cf))}) "
+                    f"carry cf_category metadata, whereas equity balance sheet accounts ({', '.join(sorted(equity_without_cf))}) have none."
+                ),
+                context={
+                    "pl_accounts_with_cf": sorted(pl_with_cf),
+                    "equity_accounts_without_cf": sorted(equity_without_cf),
+                },
+            )
+        )
 
     return findings

@@ -550,3 +550,192 @@ def test_issues_report_displays_human_review_notes_and_original_issues(data_path
     assert "`JE_ACCOUNT_UNMAPPED`" in je005_line
     assert "All validation gates passed cleanly" not in je005_line
 
+
+# ==============================================================================
+# FIX 3: Balance Sufficiency, Period Bounds & Data Quality Diagnostics
+# ==============================================================================
+
+def test_balance_sufficiency_rule_and_contra_accounts(data_path, loaded_coa, loaded_tb, loaded_fx, default_config):
+    """FIX 3: Balance sufficiency uses normal_balance from COA.
+    
+    JE-004, JE-006, JE-007, and JE-010 stay ACCEPTED.
+    Crediting contra accounts (1121, 1211) is normal-direction move.
+    Exceeding move against normal balance flags JE_EXCEEDS_BALANCE.
+    """
+    from src.journal import validate_adjustments_batch, validate_single_entry_full
+
+    batch = load_manual_adjustments(data_path / "manual_adjustments.json")
+    results = validate_adjustments_batch(
+        entries=batch.entries,
+        coa_index=loaded_coa,
+        tb=loaded_tb,
+        fx_rates=loaded_fx,
+        config=default_config,
+        batch_period=batch.period,
+    )
+
+    # JE-004 (Cr 1121 45k, contra asset Credit) stays ACCEPTED
+    assert results["JE-004"].disposition == JournalEntryDisposition.ACCEPTED
+    assert "JE_EXCEEDS_BALANCE" not in results["JE-004"].issue_codes
+
+    # JE-006 (Cr 1211 215k, contra asset Credit) stays ACCEPTED
+    assert results["JE-006"].disposition == JournalEntryDisposition.ACCEPTED
+    assert "JE_EXCEEDS_BALANCE" not in results["JE-006"].issue_codes
+
+    # JE-007 (Cr 1250 38k against 320k balance) stays ACCEPTED
+    assert results["JE-007"].disposition == JournalEntryDisposition.ACCEPTED
+    assert "JE_EXCEEDS_BALANCE" not in results["JE-007"].issue_codes
+
+    # JE-010 (Dr 2210 200k against 6,500,000 balance) stays ACCEPTED
+    assert results["JE-010"].disposition == JournalEntryDisposition.ACCEPTED
+    assert "JE_EXCEEDS_BALANCE" not in results["JE-010"].issue_codes
+
+    # Test an entry exceeding liability balance (Dr 2210 by 7,000,000 against 6,500,000 balance)
+    exceeding_entry = JournalEntry(
+        id="JE-EXCEED-LIAB",
+        description="Reclass exceeding debt balance",
+        date="2024-12-31",
+        source="Manual",
+        lines=[
+            JournalLine(account="2210", debit=Decimal("7000000.00"), credit=Decimal("0.00")),
+            JournalLine(account="2140", debit=Decimal("0.00"), credit=Decimal("7000000.00")),
+        ],
+    )
+    res_exceed = validate_single_entry_full(
+        entry=exceeding_entry,
+        coa_index=loaded_coa,
+        tb=loaded_tb,
+        fx_rates=loaded_fx,
+        config=default_config,
+        batch_period="2024-Q4",
+    )
+    assert res_exceed.disposition == JournalEntryDisposition.QUARANTINED
+    assert "JE_EXCEEDS_BALANCE" in res_exceed.issue_codes
+    assert res_exceed.details["balance_sufficiency_error"]["account"] == "2210"
+
+    # Test an entry exceeding asset balance (Cr 1140 by 250,000 against 180,000 balance)
+    exceeding_asset = JournalEntry(
+        id="JE-EXCEED-ASSET",
+        description="Write-off exceeding prepaid balance",
+        date="2024-12-31",
+        source="Manual",
+        lines=[
+            JournalLine(account="6210", debit=Decimal("250000.00"), credit=Decimal("0.00")),
+            JournalLine(account="1140", debit=Decimal("0.00"), credit=Decimal("250000.00")),
+        ],
+    )
+    res_asset = validate_single_entry_full(
+        entry=exceeding_asset,
+        coa_index=loaded_coa,
+        tb=loaded_tb,
+        fx_rates=loaded_fx,
+        config=default_config,
+        batch_period="2024-Q4",
+    )
+    assert res_asset.disposition == JournalEntryDisposition.QUARANTINED
+    assert "JE_EXCEEDS_BALANCE" in res_asset.issue_codes
+    assert res_asset.details["balance_sufficiency_error"]["account"] == "1140"
+
+
+def test_period_bounds_parsing_and_out_of_period_detection(loaded_coa, loaded_tb, loaded_fx, default_config):
+    """FIX 3: Derive 2024-10-01 to 2024-12-31 from '2024-Q4' and flag out-of-period entries."""
+    from datetime import date
+    from src.journal import parse_period_bounds, validate_single_entry_full
+
+    start, end = parse_period_bounds("2024-Q4")
+    assert start == date(2024, 10, 1)
+    assert end == date(2024, 12, 31)
+
+    # Out of period entry before Q4 (2024-09-30)
+    early_entry = JournalEntry(
+        id="JE-EARLY",
+        description="September accrual mistakenly in Q4 batch",
+        date="2024-09-30",
+        source="Manual",
+        lines=[
+            JournalLine(account="6100", debit=Decimal("1000.00"), credit=Decimal("0.00")),
+            JournalLine(account="2120", debit=Decimal("0.00"), credit=Decimal("1000.00")),
+        ],
+    )
+    res_early = validate_single_entry_full(
+        entry=early_entry,
+        coa_index=loaded_coa,
+        tb=loaded_tb,
+        fx_rates=loaded_fx,
+        config=default_config,
+        batch_period="2024-Q4",
+    )
+    assert res_early.disposition == JournalEntryDisposition.QUARANTINED
+    assert "JE_DATE_OUT_OF_PERIOD" in res_early.issue_codes
+
+    # Out of period entry after Q4 (2025-01-01)
+    late_entry = JournalEntry(
+        id="JE-LATE",
+        description="Post-closing entry in Q4 batch",
+        date="2025-01-01",
+        source="Manual",
+        lines=[
+            JournalLine(account="6100", debit=Decimal("1000.00"), credit=Decimal("0.00")),
+            JournalLine(account="2120", debit=Decimal("0.00"), credit=Decimal("1000.00")),
+        ],
+    )
+    res_late = validate_single_entry_full(
+        entry=late_entry,
+        coa_index=loaded_coa,
+        tb=loaded_tb,
+        fx_rates=loaded_fx,
+        config=default_config,
+        batch_period="2024-Q4",
+    )
+    assert res_late.disposition == JournalEntryDisposition.QUARANTINED
+    assert "JE_DATE_OUT_OF_PERIOD" in res_late.issue_codes
+
+
+def test_fix3_dq_checks_all_findings(loaded_tb, loaded_fx, loaded_coa, loaded_pp_tb, default_config):
+    """FIX 3: Verify all required DQ diagnostic findings on supplied real data."""
+    from src.dq_checks import run_data_quality_checks
+
+    findings = run_data_quality_checks(
+        tb=loaded_tb,
+        fx_rates=loaded_fx,
+        coa_index=loaded_coa,
+        prior_tb=loaded_pp_tb,
+        config=default_config,
+    )
+    findings_by_code = {f.code: f for f in findings}
+
+    # 1. Currency ambiguity
+    assert "DQ_TB_CURRENCY_AMBIGUITY" in findings_by_code
+    ambig = findings_by_code["DQ_TB_CURRENCY_AMBIGUITY"]
+    assert "-4,800.00" in ambig.message
+    assert "-338,687.00" in ambig.message
+    assert "GBP at opening 1.251" in ambig.message
+    assert "unresolved and needs controller input" in ambig.message
+
+    # 2. Duplicate 6310 reporting
+    assert "DQ_TB_DUPLICATE_ACCOUNT" in findings_by_code
+    dup = findings_by_code["DQ_TB_DUPLICATE_ACCOUNT"]
+    assert "6310" in dup.message
+    assert "duplicate or split - needs human confirmation" in dup.message
+    assert "245,000.00" in dup.message
+    assert "38,500.00" in dup.message
+
+    # 3. Pre-closing retained earnings
+    assert "DQ_TB_PRE_CLOSING_RETAINED_EARNINGS" in findings_by_code
+    re_finding = findings_by_code["DQ_TB_PRE_CLOSING_RETAINED_EARNINGS"]
+    assert "3200" in re_finding.message
+    assert "SOCIE opening equity" in re_finding.message
+
+    # 4. PPE cost jump
+    assert "DQ_PPE_COST_JUMP" in findings_by_code
+    ppe = findings_by_code["DQ_PPE_COST_JUMP"]
+    assert "1210" in ppe.message
+    assert "11,800,000.00" in ppe.message
+    assert "17,007,700.00" in ppe.message
+
+    # 5. CF category mismatch
+    assert "DQ_COA_CF_CATEGORY_MISMATCH" in findings_by_code
+    cf = findings_by_code["DQ_COA_CF_CATEGORY_MISMATCH"]
+    assert "3200" in cf.message or "3300" in cf.message
+
+

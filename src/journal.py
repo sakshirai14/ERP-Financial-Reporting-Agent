@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import calendar
 from collections import Counter
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -17,6 +19,35 @@ from src.models import (
     PostingEligibilityResult,
     TbRow,
 )
+
+
+def parse_period_bounds(period_str: str) -> tuple[date, date]:
+    """Derives start and end date bounds from a period identifier (e.g. '2024-Q4')."""
+    if not period_str:
+        return date.min, date.max
+    parts = period_str.strip().split("-")
+    if len(parts) == 2 and parts[1].upper().startswith("Q"):
+        year = int(parts[0])
+        quarter = int(parts[1][1:])
+        start_month = (quarter - 1) * 3 + 1
+        end_month = quarter * 3
+        _, last_day = calendar.monthrange(year, end_month)
+        return date(year, start_month, 1), date(year, end_month, last_day)
+    if len(parts) == 2:
+        try:
+            year = int(parts[0])
+            month = int(parts[1])
+            _, last_day = calendar.monthrange(year, month)
+            return date(year, month, 1), date(year, month, last_day)
+        except ValueError:
+            pass
+    if len(parts) == 1 and len(parts[0]) == 4:
+        try:
+            year = int(parts[0])
+            return date(year, 1, 1), date(year, 12, 31)
+        except ValueError:
+            pass
+    return date.min, date.max
 
 
 def validate_single_entry_hard_gates(
@@ -189,6 +220,7 @@ def validate_single_entry_full(
     is_inbatch_duplicate: bool = False,
     is_prior_accepted: bool = False,
     duplicate_count: int = 1,
+    batch_period: Optional[str] = "2024-Q4",
 ) -> JournalEntryValidationResult:
     """Performs complete validation on a single journal entry across all policy gates."""
     issues: list[str] = []
@@ -207,12 +239,68 @@ def validate_single_entry_full(
     _, hard_issues = validate_single_entry_hard_gates(entry, coa_index, config)
     issues.extend(hard_issues)
 
+    # Date within period check (Amendment 4)
+    if batch_period and entry.date:
+        start_d, end_d = parse_period_bounds(batch_period)
+        try:
+            entry_d = datetime.strptime(entry.date.strip(), "%Y-%m-%d").date()
+            if entry_d < start_d or entry_d > end_d:
+                issues.append("JE_DATE_OUT_OF_PERIOD")
+                details["date_error"] = {
+                    "entry_date": entry.date,
+                    "batch_period": batch_period,
+                    "period_start": str(start_d),
+                    "period_end": str(end_d),
+                }
+        except ValueError:
+            issues.append("JE_DATE_OUT_OF_PERIOD")
+
     # Soft COA check: Unmapped account
     for line in entry.lines:
         if not coa_index.account_exists(line.account):
             if "JE_ACCOUNT_PROHIBITED" not in issues and "JE_ACCOUNT_UNMAPPED" not in issues:
                 issues.append("JE_ACCOUNT_UNMAPPED")
                 details["unmapped_account"] = line.account
+
+    # Balance sufficiency rule (Amendment 1: uses normal_balance from COA)
+    # Flag only when a line moves an account AGAINST its normal side by more than current TB balance.
+    # Crediting contra accounts (normal Credit) is normal direction and must NOT be flagged.
+    if tb:
+        tb_net_balances: dict[str, Decimal] = {}
+        for tb_row in tb:
+            acc_info = coa_index.get_account(tb_row.account_code)
+            norm = acc_info.normal_balance if acc_info else None
+            if norm == "Debit":
+                tb_net_balances[tb_row.account_code] = tb_net_balances.get(tb_row.account_code, Decimal("0.00")) + (tb_row.debit - tb_row.credit)
+            elif norm == "Credit":
+                tb_net_balances[tb_row.account_code] = tb_net_balances.get(tb_row.account_code, Decimal("0.00")) + (tb_row.credit - tb_row.debit)
+
+        for line in entry.lines:
+            acc_info = coa_index.get_account(line.account)
+            if not acc_info or acc_info.statement != "BS":
+                continue
+            norm = acc_info.normal_balance
+            if line.account in tb_net_balances:
+                tb_bal = tb_net_balances[line.account]
+
+                moves_against = False
+                against_amount = Decimal("0.00")
+                if norm == "Debit" and line.credit > Decimal("0.00"):
+                    moves_against = True
+                    against_amount = line.credit
+                elif norm == "Credit" and line.debit > Decimal("0.00"):
+                    moves_against = True
+                    against_amount = line.debit
+
+                if moves_against and against_amount > tb_bal:
+                    issues.append("JE_EXCEEDS_BALANCE")
+                    details["balance_sufficiency_error"] = {
+                        "account": line.account,
+                        "account_name": acc_info.account_name,
+                        "normal_balance": norm,
+                        "against_amount": str(against_amount),
+                        "tb_balance": str(tb_bal),
+                    }
 
     # Self-offsetting check (debit and credit hitting the exact same account)
     if len(entry.lines) >= 2:
@@ -272,6 +360,7 @@ def validate_adjustments_batch(
     fx_rates: list[FxRateRow],
     config: ReportingAgentConfig,
     prior_accepted_ids: Optional[set[str]] = None,
+    batch_period: Optional[str] = "2024-Q4",
 ) -> dict[str, JournalEntryValidationResult]:
     """Validates an entire batch of manual journal adjustments deterministically."""
     results: dict[str, JournalEntryValidationResult] = {}
@@ -292,6 +381,7 @@ def validate_adjustments_batch(
             is_inbatch_duplicate=(entry.id in inbatch_duplicate_ids),
             is_prior_accepted=(entry.id in prior_accepted),
             duplicate_count=id_counts.get(entry.id, 1),
+            batch_period=batch_period,
         )
 
     return results

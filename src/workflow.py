@@ -232,6 +232,7 @@ def run_pipeline(
         fx_rates=fx_rows,
         config=cfg,
         prior_accepted_ids=prior_accepted_ids,
+        batch_period=batch.period,
     )
 
     # 7. Reconcile review decisions with active overlays

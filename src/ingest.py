@@ -91,6 +91,7 @@ def load_trial_balance(path: Path) -> list[TbRow]:
                     currency=row["currency"].strip(),
                     debit=parse_decimal(row.get("debit", "0.00")),
                     credit=parse_decimal(row.get("credit", "0.00")),
+                    row_number=reader.line_num,
                 )
             )
     return rows

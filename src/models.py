@@ -92,6 +92,7 @@ class TbRow(BaseModel):
     currency: str
     debit: Decimal = Decimal("0.00")
     credit: Decimal = Decimal("0.00")
+    row_number: Optional[int] = None
 
 
 class FxRateRow(BaseModel):
