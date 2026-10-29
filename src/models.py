@@ -143,6 +143,7 @@ class PipelineExecutionResult:
     input_file_hashes: dict[str, str]
     summary: ExecutionSummary
     entries: list[JournalEntry] = field(default_factory=list)
+    is_cached: bool = False
 
 
 @dataclass(frozen=True)

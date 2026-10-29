@@ -8,13 +8,15 @@ from typing import Any, Optional
 from src.config import ReportingAgentConfig, compute_policy_fingerprint
 from src.dq_checks import check_posting_eligibility
 from src.ingest import CoaIndex, parse_decimal
-from src.journal import validate_single_entry_hard_gates
+from src.journal import evaluate_fx_revaluation, validate_single_entry_hard_gates
 from src.models import (
+    FxRateRow,
     JournalEntry,
     JournalEntryDisposition,
     JournalLine,
     ReviewDecisionRecord,
     ReviewOperationResult,
+    TbRow,
 )
 from src.store import ReviewStore
 
@@ -27,10 +29,14 @@ class HITLReviewService:
         store: ReviewStore,
         coa_index: CoaIndex,
         config: ReportingAgentConfig,
+        tb: Optional[list[TbRow]] = None,
+        fx_rates: Optional[list[FxRateRow]] = None,
     ):
         self.store = store
         self.coa = coa_index
         self.config = config
+        self.tb = tb or []
+        self.fx_rates = fx_rates or []
 
     def approve_entry(
         self,
@@ -41,7 +47,8 @@ class HITLReviewService:
     ) -> ReviewOperationResult:
         """Approves a quarantined entry containing reviewable advisories.
 
-        Cannot approve entries with hard validation failures or unmapped accounts.
+        Cannot approve entries with hard validation failures, unmapped accounts,
+        in-batch duplicate conflicts, or FX revaluation calculation discrepancies.
         """
         if not reviewer or not reviewer.strip():
             return ReviewOperationResult(success=False, error_message="Reviewer identity is required.")
@@ -52,7 +59,7 @@ class HITLReviewService:
         if not target_entry:
             return ReviewOperationResult(success=False, error_message=f"Entry {entry_id} not found.")
 
-        # Hard validation pre-flight check
+        # 1. Hard validation pre-flight check
         is_valid, hard_issues = validate_single_entry_hard_gates(target_entry, self.coa, self.config)
         if not is_valid:
             return ReviewOperationResult(
@@ -63,7 +70,7 @@ class HITLReviewService:
                 ),
             )
 
-        # Check for unmapped accounts
+        # 2. Check for unmapped accounts (requires map-account first)
         unmapped_accounts = [
             line.account for line in target_entry.lines if not self.coa.account_exists(line.account)
         ]
@@ -76,8 +83,24 @@ class HITLReviewService:
                 ),
             )
 
-        # Check for FX mismatch or direction failures
-        # (These require correction/resubmission or reclassification, not blind approval)
+        # 3. Full FX policy revalidation (calculation and direction)
+        account_set = {line.account for line in target_entry.lines}
+        is_fx_candidate = (
+            target_entry.entry_type == "fx_revaluation" or
+            (target_entry.entry_type is None and account_set == {self.config.fx.asset_account_code, self.config.fx.gain_loss_account_code})
+        )
+        if is_fx_candidate and self.tb and self.fx_rates:
+            fx_issue, fx_ctx = evaluate_fx_revaluation(target_entry, self.config.fx, self.tb, self.fx_rates, self.config)
+            if fx_issue:
+                return ReviewOperationResult(
+                    success=False,
+                    error_message=(
+                        f"Cannot approve entry {entry_id}: contains unresolved FX policy failure ({fx_issue}). "
+                        "FX calculation and direction discrepancies cannot be cleared by approving the unchanged entry. "
+                        "Entry must be corrected, resubmitted, or reclassified via the explicit reclassification workflow."
+                    ),
+                )
+
         fingerprint = compute_policy_fingerprint(self.config)
         self.store.record_decision(
             entry_id=entry_id,
@@ -198,7 +221,7 @@ class HITLReviewService:
                 error_message=f"Candidate entry failed hard validation after mapping: {hard_issues}",
             )
 
-        # 6. Atomic Persistence in SQLite Transaction
+        # 6. Atomic Persistence in SQLite Transaction (verifies state inside transaction)
         fingerprint = compute_policy_fingerprint(self.config)
         try:
             self.store.persist_account_mapping(
@@ -268,7 +291,7 @@ class HITLReviewService:
             reviewer=reviewer.strip(),
             notes=notes.strip(),
             policy_fingerprint=fingerprint,
-            prior_classification="candidate_fx",
+            prior_classification=target_entry.entry_type or "candidate_fx",
             new_classification=classification,
             issue_codes=[],
             updated_entry=candidate_entry,

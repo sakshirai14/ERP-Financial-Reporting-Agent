@@ -1,0 +1,471 @@
+"""Comprehensive regression tests covering verified defects P0/P1:
+1. FX approval safety (JE-003, FX mismatch and direction gates)
+2. Rerun idempotency (cache hit, cache invalidation, review reconciliation)
+3. Persisted human-review changes (JE-005 mapping overlay, classification persistence, raw file immutability)
+4. Atomic mapping (transactional concurrency, stale state rejection, rollback)
+5. Cross-batch duplicate handling (same batch rerun vs. genuine resubmission)
+"""
+
+from __future__ import annotations
+
+import copy
+import hashlib
+import json
+import shutil
+from decimal import Decimal
+from pathlib import Path
+import pytest
+
+from src.config import FxRevalPolicy, ReportingAgentConfig, ReportingPolicy, compute_policy_fingerprint
+from src.hitl import HITLReviewService
+from src.ingest import CoaIndex, load_chart_of_accounts, load_manual_adjustments
+from src.models import (
+    JournalEntry,
+    JournalEntryDisposition,
+    JournalLine,
+    JournalEntryValidationResult,
+)
+from src.store import ReviewStore
+from src.workflow import run_pipeline
+
+
+# ==============================================================================
+# 1. FX Approval Safety
+# ==============================================================================
+
+def test_fx_approval_safety_blocks_unchanged_je_003(loaded_coa, loaded_tb, loaded_fx, default_config, data_path):
+    """Bug 1: HITLReviewService.approve_entry() must not clear JE_FX_MISMATCH on unchanged JE-003.
+
+    Approval must fail, and no ACCEPTED decision must be persisted.
+    """
+    batch = load_manual_adjustments(data_path / "manual_adjustments.json")
+    je_003 = next(e for e in batch.entries if e.id == "JE-003")
+
+    store = ReviewStore(":memory:")
+    val_res = JournalEntryValidationResult(
+        entry_id="JE-003",
+        disposition=JournalEntryDisposition.QUARANTINED,
+        issue_codes=["JE_FX_MISMATCH"],
+        is_balanced=True,
+        accounts_exist_in_coa=True,
+        accounts_are_postable=True,
+        line_currencies_consistent=True,
+        details={"discrepancy": "-8609.60"},
+    )
+    store.persist_quarantined_entries([je_003], {"JE-003": val_res})
+
+    service = HITLReviewService(store, loaded_coa, default_config, tb=loaded_tb, fx_rates=loaded_fx)
+    
+    # Attempting to approve unchanged JE-003 must fail
+    res = service.approve_entry("JE-003", reviewer="auditor_jane", notes="Attempting to force-approve FX mismatch")
+    assert res.success is False
+    assert "JE_FX_MISMATCH" in res.error_message or "Accounting policy validation failed" in res.error_message
+    assert store.get_decision("JE-003") is None
+
+
+def test_fx_approval_safety_blocks_direction_invalid(loaded_coa, default_config):
+    """Bug 1: HITLReviewService.approve_entry() must reject entries with JE_FX_DIRECTION_INVALID."""
+    store = ReviewStore(":memory:")
+    entry = JournalEntry(
+        id="JE-FX-DIR",
+        description="EUR Bank revaluation reversed",
+        date="2024-12-31",
+        source="Manual",
+        entry_type="fx_revaluation",
+        source_currency="EUR",
+        lines=[
+            JournalLine(account="1110", debit=Decimal("0.00"), credit=Decimal("19809.60")),
+            JournalLine(account="7110", debit=Decimal("19809.60"), credit=Decimal("0.00")),
+        ],
+    )
+    val_res = JournalEntryValidationResult(
+        entry_id="JE-FX-DIR",
+        disposition=JournalEntryDisposition.QUARANTINED,
+        issue_codes=["JE_FX_DIRECTION_INVALID"],
+        is_balanced=True,
+        accounts_exist_in_coa=True,
+        accounts_are_postable=True,
+        line_currencies_consistent=True,
+    )
+    store.persist_quarantined_entries([entry], {"JE-FX-DIR": val_res})
+
+    service = HITLReviewService(store, loaded_coa, default_config)
+    res = service.approve_entry("JE-FX-DIR", reviewer="auditor_jane", notes="Approve wrong direction")
+    assert res.success is False
+    assert store.get_decision("JE-FX-DIR") is None
+
+
+def test_fx_reclassification_explicit_audited_workflow(loaded_coa, default_config):
+    """Bug 1: Permit reclassification only through the explicit, audited reclassification workflow."""
+    store = ReviewStore(":memory:")
+    entry = JournalEntry(
+        id="JE-CANDIDATE",
+        description="Reclassification test entry",
+        date="2024-12-31",
+        source="Manual",
+        entry_type="fx_candidate",
+        lines=[
+            JournalLine(account="1110", debit=Decimal("10000.00"), credit=Decimal("0.00")),
+            JournalLine(account="7110", debit=Decimal("0.00"), credit=Decimal("10000.00")),
+        ],
+    )
+    val_res = JournalEntryValidationResult(
+        entry_id="JE-CANDIDATE",
+        disposition=JournalEntryDisposition.QUARANTINED,
+        issue_codes=["JE_FX_MISMATCH"],
+        is_balanced=True,
+        accounts_exist_in_coa=True,
+        accounts_are_postable=True,
+        line_currencies_consistent=True,
+    )
+    store.persist_quarantined_entries([entry], {"JE-CANDIDATE": val_res})
+
+    service = HITLReviewService(store, loaded_coa, default_config)
+    res = service.reclassify_and_revalidate(
+        entry_id="JE-CANDIDATE",
+        classification="standard_adjustment",
+        reviewer="auditor_jane",
+        notes="Reclassified from candidate to standard adjustment",
+    )
+    assert res.success is True
+    assert res.disposition == JournalEntryDisposition.ACCEPTED
+
+    # Verify decision and audit event persisted
+    dec = store.get_decision("JE-CANDIDATE")
+    assert dec is not None
+    assert dec.new_classification == "standard_adjustment"
+    assert dec.prior_classification == "fx_candidate"
+
+    audits = store.get_audit_events()
+    assert any(a.new_classification == "standard_adjustment" and a.entry_id == "JE-CANDIDATE" for a in audits)
+
+
+# ==============================================================================
+# 2. Rerun Idempotency
+# ==============================================================================
+
+def test_rerun_idempotency_cache_reuse_and_invalidation(tmp_path, data_path):
+    """Bug 2: run_pipeline() correctly reuses cache on identical run, and invalidates on source/policy change."""
+    db_file = tmp_path / "review.db"
+    out_dir = tmp_path / "output"
+
+    # Run 1: initial run
+    res1 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res1.is_cached is False
+    assert res1.summary.total_entries == 10
+
+    # Run 2: repeated identical run -> MUST hit cache
+    res2 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res2.is_cached is True
+    assert res2.summary.accepted_count == res1.summary.accepted_count
+    assert res2.summary.quarantined_count == res1.summary.quarantined_count
+
+    # Run 3: force_rerun -> MUST NOT hit cache
+    res3 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file, force_rerun=True)
+    assert res3.is_cached is False
+
+    # Invalidation test A: Policy modification -> fingerprint changes -> cache miss
+    custom_cfg = ReportingAgentConfig(fx=FxRevalPolicy(tolerance=Decimal("50.00")))
+    res_pol = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file, config=custom_cfg)
+    assert res_pol.is_cached is False
+    assert res_pol.policy_fingerprint != res1.policy_fingerprint
+
+    # Invalidation test B: Source modification -> run_hash changes -> cache miss
+    mod_data = tmp_path / "mod_data"
+    shutil.copytree(data_path, mod_data)
+    # Touch or append newline to manual_adjustments.json
+    with open(mod_data / "manual_adjustments.json", "a") as f:
+        f.write("\n")
+    res_src = run_pipeline(data_dir=mod_data, output_dir=out_dir, db_path=db_file)
+    assert res_src.is_cached is False
+
+
+def test_cached_results_do_not_bypass_review_decisions(tmp_path, data_path):
+    """Bug 2: A newly approved review decision invalidates the previous cached run and reconciles correctly."""
+    db_file = tmp_path / "review.db"
+    out_dir = tmp_path / "output"
+
+    # Run 1
+    res1 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res1.adjustments["JE-008"].disposition == JournalEntryDisposition.QUARANTINED
+    assert res1.is_cached is False
+
+    # Reviewer approves JE-008 (self-offsetting advisory review)
+    config = ReportingAgentConfig()
+    coa = CoaIndex(load_chart_of_accounts(data_path / "chart_of_accounts.csv"))
+    store = ReviewStore(db_file)
+    service = HITLReviewService(store, coa, config)
+    appr = service.approve_entry("JE-008", reviewer="auditor_jane", notes="Approved intentional intercompany offset")
+    assert appr.success is True
+    store.close()
+
+    # Run 2: Cache key MUST incorporate overlays_hash, so this run revalidates and reflects JE-008 ACCEPTED
+    res2 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res2.adjustments["JE-008"].disposition == JournalEntryDisposition.ACCEPTED
+
+
+# ==============================================================================
+# 3. Persisted Human-Review Changes
+# ==============================================================================
+
+def test_persisted_account_mapping_je_005_and_raw_file_immutability(tmp_path, data_path):
+    """Bug 3: JE-005 mapping persists across subsequent runs as an overlay without mutating raw source file."""
+    db_file = tmp_path / "review.db"
+    out_dir = tmp_path / "output"
+
+    # Compute hash of raw manual_adjustments.json before run
+    raw_file = data_path / "manual_adjustments.json"
+    with open(raw_file, "rb") as f:
+        orig_raw_hash = hashlib.sha256(f.read()).hexdigest()
+
+    # Run 1
+    res1 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res1.adjustments["JE-005"].disposition == JournalEntryDisposition.QUARANTINED
+
+    # Human maps account 6315 -> 6310
+    config = ReportingAgentConfig()
+    coa = CoaIndex(load_chart_of_accounts(data_path / "chart_of_accounts.csv"))
+    store = ReviewStore(db_file)
+    service = HITLReviewService(store, coa, config)
+    res_map = service.map_and_revalidate(
+        entry_id="JE-005",
+        from_account="6315",
+        to_account="6310",
+        reviewer="auditor_jane",
+        notes="Mapped software subscription to 6310 IT Expense",
+    )
+    assert res_map.success is True
+    assert res_map.disposition == JournalEntryDisposition.ACCEPTED
+    store.close()
+
+    # Verify original source file remains 100% UNCHANGED
+    with open(raw_file, "rb") as f:
+        post_map_hash = hashlib.sha256(f.read()).hexdigest()
+    assert orig_raw_hash == post_map_hash, "Violation: Raw source data file was modified!"
+
+    # Run 2: Subsequent pipeline run
+    res2 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res2.adjustments["JE-005"].disposition == JournalEntryDisposition.ACCEPTED
+    assert res2.adjustments["JE-005"].issue_codes == []
+
+    # Verify source file STILL untouched
+    with open(raw_file, "rb") as f:
+        run2_raw_hash = hashlib.sha256(f.read()).hexdigest()
+    assert orig_raw_hash == run2_raw_hash, "Violation: Raw source data file was modified during run 2!"
+
+
+def test_persisted_classification_across_runs(tmp_path, data_path):
+    """Bug 3: Reclassification overlay persists across subsequent pipeline runs."""
+    db_file = tmp_path / "review.db"
+    out_dir = tmp_path / "output"
+
+    # Setup isolated test data directory
+    test_data = tmp_path / "test_data"
+    shutil.copytree(data_path, test_data)
+
+    # Add a candidate entry to test_data
+    with open(test_data / "manual_adjustments.json", "r") as f:
+        batch_dict = json.load(f)
+    
+    candidate_entry = {
+        "id": "JE-099",
+        "date": "2024-12-31",
+        "description": "Candidate reval",
+        "source": "Manual",
+        "entry_type": "fx_candidate",
+        "lines": [
+            {"account": "1110", "debit": "10000.00", "credit": "0.00", "currency": "USD"},
+            {"account": "7310", "debit": "0.00", "credit": "10000.00", "currency": "USD"},
+        ],
+    }
+    batch_dict["entries"].append(candidate_entry)
+    with open(test_data / "manual_adjustments.json", "w") as f:
+        json.dump(batch_dict, f, indent=2)
+
+    # Run 1: JE-099 quarantined for FX mismatch
+    res1 = run_pipeline(data_dir=test_data, output_dir=out_dir, db_path=db_file)
+    assert res1.adjustments["JE-099"].disposition == JournalEntryDisposition.QUARANTINED
+
+    # Reviewer reclassifies JE-099 to standard_adjustment
+    config = ReportingAgentConfig()
+    coa = CoaIndex(load_chart_of_accounts(test_data / "chart_of_accounts.csv"))
+    store = ReviewStore(db_file)
+    service = HITLReviewService(store, coa, config)
+    res_rec = service.reclassify_and_revalidate(
+        entry_id="JE-099",
+        classification="standard_adjustment",
+        reviewer="auditor_jane",
+        notes="Reclassified after verifying non-revaluation business purpose",
+    )
+    assert res_rec.success is True
+    assert res_rec.disposition == JournalEntryDisposition.ACCEPTED
+    store.close()
+
+    # Run 2: The reclassification overlay persists across subsequent runs
+    res2 = run_pipeline(data_dir=test_data, output_dir=out_dir, db_path=db_file)
+    assert res2.adjustments["JE-099"].disposition == JournalEntryDisposition.ACCEPTED
+
+
+def test_policy_change_invalidates_stale_review_decisions(tmp_path, data_path):
+    """Bug 3: Changing policy fingerprint invalidates stale review decisions."""
+    db_file = tmp_path / "review.db"
+    out_dir = tmp_path / "output"
+
+    # Run 1
+    res1 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+
+    # Approve JE-008 under default policy
+    config = ReportingAgentConfig()
+    coa = CoaIndex(load_chart_of_accounts(data_path / "chart_of_accounts.csv"))
+    store = ReviewStore(db_file)
+    service = HITLReviewService(store, coa, config)
+    service.approve_entry("JE-008", reviewer="auditor_jane", notes="Approved under policy A")
+    store.close()
+
+    # Verify active overlays exist under policy A
+    store = ReviewStore(db_file)
+    fp_a = compute_policy_fingerprint(config)
+    assert len(store.get_active_review_overlays(fp_a)) == 1
+
+    # Now run under policy B (different fingerprint)
+    config_b = ReportingAgentConfig(reporting=ReportingPolicy(require_currency_safe_tb=False))
+    fp_b = compute_policy_fingerprint(config_b)
+    assert fp_a != fp_b
+
+    # Under policy B, the decision from policy A is NOT active
+    assert len(store.get_active_review_overlays(fp_b)) == 0
+    store.close()
+
+    # Running under policy B will revalidate from clean state
+    res_b = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file, config=config_b)
+    assert res_b.adjustments["JE-008"].disposition == JournalEntryDisposition.QUARANTINED
+
+
+# ==============================================================================
+# 4. Atomic Mapping & Concurrency Safety
+# ==============================================================================
+
+def test_atomic_mapping_stale_state_rejection(loaded_coa, default_config):
+    """Bug 4: map_and_revalidate() rejects stale or concurrent attempts where source account changed."""
+    store = ReviewStore(":memory:")
+    entry = JournalEntry(
+        id="JE-005",
+        description="Software sub",
+        date="2024-12-31",
+        source="Test",
+        lines=[
+            JournalLine(account="6315", debit=Decimal("45000.00"), credit=Decimal("0.00")),
+            JournalLine(account="2110", debit=Decimal("0.00"), credit=Decimal("45000.00")),
+        ],
+    )
+    val_res = JournalEntryValidationResult(
+        entry_id="JE-005",
+        disposition=JournalEntryDisposition.QUARANTINED,
+        issue_codes=["JE_ACCOUNT_UNMAPPED"],
+        is_balanced=True,
+        accounts_exist_in_coa=False,
+        accounts_are_postable=True,
+        line_currencies_consistent=True,
+    )
+    store.persist_quarantined_entries([entry], {"JE-005": val_res})
+
+    service = HITLReviewService(store, loaded_coa, default_config)
+
+    # First mapping succeeds: 6315 -> 6310
+    res1 = service.map_and_revalidate("JE-005", "6315", "6310", reviewer="auditor_1", notes="First mapping")
+    assert res1.success is True
+
+    # Second concurrent/stale mapping attempt targeting original account 6315 must be rejected
+    res2 = service.map_and_revalidate("JE-005", "6315", "6320", reviewer="auditor_2", notes="Stale concurrent attempt")
+    assert res2.success is False
+    assert "no longer unmapped" in res2.error_message or "Conflict" in res2.error_message or "Source account" in res2.error_message or "does not exist" in res2.error_message
+
+
+def test_atomic_mapping_rollback_on_failure(loaded_coa, default_config):
+    """Bug 4: Persist mapping, decision, and audit event atomically; rollback on failure."""
+    store = ReviewStore(":memory:")
+    entry = JournalEntry(
+        id="JE-005",
+        description="Software sub",
+        date="2024-12-31",
+        source="Test",
+        lines=[
+            JournalLine(account="6315", debit=Decimal("45000.00"), credit=Decimal("0.00")),
+            JournalLine(account="2110", debit=Decimal("0.00"), credit=Decimal("45000.00")),
+        ],
+    )
+    val_res = JournalEntryValidationResult(
+        entry_id="JE-005",
+        disposition=JournalEntryDisposition.QUARANTINED,
+        issue_codes=["JE_ACCOUNT_UNMAPPED"],
+        is_balanced=True,
+        accounts_exist_in_coa=False,
+        accounts_are_postable=True,
+        line_currencies_consistent=True,
+    )
+    store.persist_quarantined_entries([entry], {"JE-005": val_res})
+
+    service = HITLReviewService(store, loaded_coa, default_config)
+
+    # Attempt mapping to non-existent account 9999 -> fails validation
+    res = service.map_and_revalidate("JE-005", "6315", "9999", reviewer="auditor_1", notes="Bad target")
+    assert res.success is False
+
+    # Verify complete rollback: no decision record or audit event persisted
+    assert store.get_decision("JE-005") is None
+    assert len(store.get_audit_events()) == 0
+
+
+# ==============================================================================
+# 5. Cross-Batch Duplicate Handling
+# ==============================================================================
+
+def test_cross_batch_duplicate_same_batch_repeat_not_quarantined(tmp_path, data_path):
+    """Bug 5: An unchanged repeat run of the SAME batch must not convert previously accepted entries into quarantined."""
+    db_file = tmp_path / "review.db"
+    out_dir = tmp_path / "output"
+
+    # Run 1
+    res1 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res1.adjustments["JE-001"].disposition == JournalEntryDisposition.ACCEPTED
+
+    # Run 2: Same batch rerun (force_rerun=True to exercise validation logic directly)
+    res2 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file, force_rerun=True)
+    assert res2.adjustments["JE-001"].disposition == JournalEntryDisposition.ACCEPTED
+    assert "JE_PRIOR_ACCEPTANCE" not in res2.adjustments["JE-001"].issue_codes
+
+
+def test_cross_batch_duplicate_genuine_resubmission_quarantined(tmp_path, data_path):
+    """Bug 5: A genuinely resubmitted entry in a DIFFERENT batch (different run hash) flags JE_PRIOR_ACCEPTANCE."""
+    db_file = tmp_path / "review.db"
+    out_dir = tmp_path / "output"
+
+    # Run 1: Batch 1 processed
+    res1 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res1.adjustments["JE-001"].disposition == JournalEntryDisposition.ACCEPTED
+
+    # Create Batch 2: Different batch run (e.g. modified batch containing resubmitted JE-001 and an unrelated new entry)
+    batch2_dir = tmp_path / "batch2_data"
+    shutil.copytree(data_path, batch2_dir)
+
+    with open(batch2_dir / "manual_adjustments.json", "r") as f:
+        batch2_dict = json.load(f)
+
+    # Add a new entry to change the batch run hash
+    batch2_dict["entries"].append({
+        "id": "JE-101",
+        "date": "2024-12-31",
+        "description": "Unrelated new adjustment in batch 2",
+        "source": "Manual",
+        "lines": [
+            {"account": "6110", "debit": "100.00", "credit": "0.00", "currency": "USD"},
+            {"account": "2110", "debit": "0.00", "credit": "100.00", "currency": "USD"},
+        ],
+    })
+    with open(batch2_dir / "manual_adjustments.json", "w") as f:
+        json.dump(batch2_dict, f, indent=2)
+
+    # Run Batch 2: JE-001 was accepted in Batch 1, so in Batch 2 it MUST be flagged with JE_PRIOR_ACCEPTANCE
+    res2 = run_pipeline(data_dir=batch2_dir, output_dir=out_dir, db_path=db_file)
+    assert res2.adjustments["JE-001"].disposition == JournalEntryDisposition.QUARANTINED
+    assert "JE_PRIOR_ACCEPTANCE" in res2.adjustments["JE-001"].issue_codes

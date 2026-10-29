@@ -232,7 +232,7 @@ def validate_adjustments_batch(
         # FX Revaluation candidate or confirmed check
         account_set = {line.account for line in entry.lines}
         is_fx_candidate = (
-            entry.entry_type == "fx_revaluation" or
+            entry.entry_type in ("fx_revaluation", "fx_candidate") or
             (entry.entry_type is None and account_set == {config.fx.asset_account_code, config.fx.gain_loss_account_code})
         )
 

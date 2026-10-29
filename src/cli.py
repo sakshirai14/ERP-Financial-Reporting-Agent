@@ -8,7 +8,7 @@ from pathlib import Path
 
 from src.config import ReportingAgentConfig
 from src.hitl import HITLReviewService
-from src.ingest import CoaIndex, load_chart_of_accounts
+from src.ingest import CoaIndex, load_chart_of_accounts, load_fx_rates, load_trial_balance
 from src.models import JournalEntryDisposition
 from src.store import ReviewStore
 from src.workflow import run_pipeline
@@ -45,6 +45,7 @@ def main() -> None:
     rej_parser.add_argument("--entry-id", required=True, help="Entry ID to reject.")
     rej_parser.add_argument("--reviewer", required=True, help="Reviewer identity.")
     rej_parser.add_argument("--notes", required=True, help="Documented review notes.")
+    rej_parser.add_argument("--data-dir", type=Path, default=Path("data"), help="Path to data directory.")
     rej_parser.add_argument("--db-path", type=Path, default=Path("output/review_store.db"), help="Path to SQLite review store.")
 
     # 5. map-account command
@@ -101,8 +102,10 @@ def main() -> None:
     elif args.command == "approve":
         config = ReportingAgentConfig()
         coa = CoaIndex(load_chart_of_accounts(args.data_dir / "chart_of_accounts.csv"))
+        tb = load_trial_balance(args.data_dir / "trial_balance.csv")
+        fx = load_fx_rates(args.data_dir / "fx_rates.csv")
         store = ReviewStore(args.db_path)
-        service = HITLReviewService(store, coa, config)
+        service = HITLReviewService(store, coa, config, tb=tb, fx_rates=fx)
         op_res = service.approve_entry(args.entry_id, args.reviewer, args.notes)
         if op_res.success:
             print(f"SUCCESS: Entry {args.entry_id} approved. Disposition: {op_res.disposition.value}")
@@ -112,9 +115,11 @@ def main() -> None:
 
     elif args.command == "reject":
         config = ReportingAgentConfig()
-        coa = CoaIndex(load_chart_of_accounts(Path("data/chart_of_accounts.csv")))
+        coa = CoaIndex(load_chart_of_accounts(args.data_dir / "chart_of_accounts.csv"))
+        tb = load_trial_balance(args.data_dir / "trial_balance.csv")
+        fx = load_fx_rates(args.data_dir / "fx_rates.csv")
         store = ReviewStore(args.db_path)
-        service = HITLReviewService(store, coa, config)
+        service = HITLReviewService(store, coa, config, tb=tb, fx_rates=fx)
         op_res = service.reject_entry(args.entry_id, args.reviewer, args.notes)
         if op_res.success:
             print(f"SUCCESS: Entry {args.entry_id} rejected.")
@@ -125,8 +130,10 @@ def main() -> None:
     elif args.command == "map-account":
         config = ReportingAgentConfig()
         coa = CoaIndex(load_chart_of_accounts(args.data_dir / "chart_of_accounts.csv"))
+        tb = load_trial_balance(args.data_dir / "trial_balance.csv")
+        fx = load_fx_rates(args.data_dir / "fx_rates.csv")
         store = ReviewStore(args.db_path)
-        service = HITLReviewService(store, coa, config)
+        service = HITLReviewService(store, coa, config, tb=tb, fx_rates=fx)
         op_res = service.map_and_revalidate(
             entry_id=args.entry_id,
             from_account=args.from_account,
@@ -144,8 +151,10 @@ def main() -> None:
     elif args.command == "reclassify-entry":
         config = ReportingAgentConfig()
         coa = CoaIndex(load_chart_of_accounts(args.data_dir / "chart_of_accounts.csv"))
+        tb = load_trial_balance(args.data_dir / "trial_balance.csv")
+        fx = load_fx_rates(args.data_dir / "fx_rates.csv")
         store = ReviewStore(args.db_path)
-        service = HITLReviewService(store, coa, config)
+        service = HITLReviewService(store, coa, config, tb=tb, fx_rates=fx)
         op_res = service.reclassify_and_revalidate(
             entry_id=args.entry_id,
             classification=args.classification,
