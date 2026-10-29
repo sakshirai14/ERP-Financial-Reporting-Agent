@@ -236,14 +236,14 @@ SELECT
 
 | Architecture Module | Implementation Status | Shipped Prototype Components |
 |---|---|---|
-| **Binary Ingestion & Hashing** | **BUILT (100%)** | `src/ingest.py`, SHA-256 digests, Pydantic schemas |
-| **COA Hierarchy & Eligibility** | **BUILT (100%)** | `src/ingest.py`, Condition A & B postability checks |
-| **Data Quality Diagnostics** | **BUILT (100%)** | `src/dq_checks.py`, multi-currency TB, duplicate detection |
-| **Manual Adjustments Validation**| **BUILT (100%)** | `src/journal.py`, hard gates, symmetric deduplication |
-| **FX Revaluation Verification** | **BUILT (100%)** | `src/journal.py`, FX contract, basis vs. delta precedence |
-| **Pluggable LLM Layer (Mock/Live)**| **BUILT (100%)** | `src/llm.py`, `src/resolver.py`, Task A & B, run trace |
-| **HITL Review Store & CLI** | **BUILT (100%)** | `src/store.py`, `src/hitl.py`, `src/cli.py`, SQLite ACID |
-| **Audit Trace & Markdown Reporting**| **BUILT (100%)** | `src/audit.py`, `evaluation_report.md`, `issues_report.md` |
+| **Binary Ingestion & Hashing** | **Built and tested** | `src/ingest.py`, SHA-256 digests, Pydantic schemas |
+| **COA Hierarchy & Eligibility** | **Built and tested** | `src/ingest.py`, Condition A & B postability checks |
+| **Data Quality Diagnostics** | **Built and tested** | `src/dq_checks.py`, multi-currency TB, duplicate detection |
+| **Manual Adjustments Validation**| **Built and tested** | `src/journal.py`, hard gates, symmetric deduplication |
+| **FX Revaluation Verification** | **Built and tested** | `src/journal.py`, FX contract, basis vs. delta precedence |
+| **Pluggable LLM Layer (Mock/Live)**| **Built and tested (mock mode)** | `src/llm.py`, `src/resolver.py`, Task A & B, run trace |
+| **HITL Review Store & CLI** | **Built and tested** | `src/store.py`, `src/hitl.py`, `src/cli.py`, SQLite ACID |
+| **Audit Trace & Markdown Reporting**| **Built and tested** | `src/audit.py`, `evaluation_report.md`, `issues_report.md` |
 | **Financial Statement Builder** | *DESIGNED* | Formally specified; target for post-prototype phase |
 | **Statement Verifier & Linkages** | *DESIGNED* | Invariants specified; target for post-prototype phase |
 | **Cross-Statement Reconciler** | *DESIGNED* | Articulation logic specified; target for post-prototype phase |
