@@ -3,7 +3,7 @@ JE-001,ACCEPTED,,True,{}
 JE-002,REJECTED,JE_UNBALANCED,False,{}
 JE-003,QUARANTINED,JE_FX_MISMATCH,True,"{""booked_amount"": ""11200.0"", ""expected_usd_delta"": ""19809.60"", ""discrepancy"": ""-8609.60"", ""opening_rate"": ""1.071"", ""period_end_rate"": ""1.095"", ""rates_used"": {""opening_rate"": ""1.071"", ""period_end_rate"": ""1.095""}, ""source_balance"": ""825400.00"", ""native_balance"": ""825400.00"", ""currency"": ""EUR"", ""fx_context"": {""booked_amount"": ""11200.0"", ""expected_usd_delta"": ""19809.60"", ""discrepancy"": ""-8609.60"", ""opening_rate"": ""1.071"", ""period_end_rate"": ""1.095"", ""rates_used"": {""opening_rate"": ""1.071"", ""period_end_rate"": ""1.095""}, ""source_balance"": ""825400.00"", ""native_balance"": ""825400.00"", ""currency"": ""EUR""}}"
 JE-004,ACCEPTED,,True,{}
-JE-005,QUARANTINED,JE_ACCOUNT_UNMAPPED,True,"{""unmapped_account"": ""6315"", ""ai_suggested_account"": ""1131"", ""ai_confidence"": 0.6, ""ai_escalated"": false, ""ai_self_offsetting"": false}"
+JE-005,QUARANTINED,JE_ACCOUNT_UNMAPPED,True,"{""unmapped_account"": ""6315"", ""ai_suggested_account"": null, ""ai_confidence"": 0.24, ""ai_escalated"": true, ""ai_self_offsetting"": false}"
 JE-006,ACCEPTED,,True,{}
 JE-007,ACCEPTED,,True,{}
 JE-008,QUARANTINED,JE_SELF_OFFSETTING,True,"{""offsetting_account"": ""2170""}"

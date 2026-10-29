@@ -109,6 +109,8 @@ Therefore, our architecture implements a **deterministic spine with narrow LLM t
 | **Missing FX Rate Gap** | Arbitrary or stale rates distort foreign currency valuation | Fail-Closed Architecture. Emits `DQ_RATE_MISSING` and `DQ_TB_RECONCILIATION_BLOCKED`. Halts automated closing without inventing rates. |
 | **Circular Intercompany Postings** | Artificial inflation of intercompany receivables and payables | Symmetrical self-offsetting detector (`JE_SELF_OFFSETTING`). Quarantined for auditor business justification. |
 | **Ambiguous Currency Semantics** | Distorts multi-currency cash balances by hundreds of thousands | `DQ_TB_CURRENCY_AMBIGUITY` detects that native translation expands imbalance from -$4.8k to -$338k. Flags both figures and escalates to Controller. |
+| **Weak / Cross-Family AI Suggestion** | Unmapped expense mapped to balance sheet asset/liability or low-confidence pick | Resolver restricts candidate search strictly to matching statement (PL/BS) and account family (first digit). Ranks by name similarity (`token_set_ratio`) and runner-up margin. If best non-self-offsetting candidate is below threshold, escalates (`ai_escalated=True`) and suppresses pick, stating human decision required. |
+
 
 ---
 

@@ -28,54 +28,66 @@ class AccountResolver:
         limit: int = 5,
         other_accounts: Optional[set[str]] = None,
     ) -> list[dict[str, Any]]:
-        """Suggests closest postable leaf accounts based on code prefix and name similarity.
+        """Suggests closest postable leaf accounts within the same statement and account family.
 
-        Produces top candidate accounts (default 5). Never suggests header accounts or parent accounts.
-        Flags candidates that would cause self-offsetting journal lines.
+        Restricts candidates to postable leaf accounts with the same statement (PL/BS)
+        and same first digit (e.g. 6000 family for 6315).
+        Ranks primarily by token_set_ratio between description and account names,
+        using shared code prefix length as a secondary signal.
+        Always flags candidates that would cause self-offsetting journal lines.
         """
-        suggestions: list[dict[str, Any]] = []
         other = other_accounts or set()
+        clean_code = unmapped_code.strip()
+        first_digit = clean_code[0] if clean_code else ""
 
-        # 1. Code similarity match
-        code_choices = {acc.account_code: acc for acc in self.postable_accounts}
-        code_matches = process.extract(
-            unmapped_code,
-            code_choices.keys(),
-            scorer=fuzz.ratio,
-            limit=limit,
-        )
+        # Determine expected financial statement from first digit
+        expected_statement = "BS" if first_digit in ("1", "2", "3") else "PL"
 
-        for match_code, score, _ in code_matches:
-            acc = code_choices[match_code]
-            suggestions.append({
+        # Restrict candidates to postable leaf accounts with the same statement AND same first digit
+        matching_pool = [
+            acc for acc in self.postable_accounts
+            if acc.statement == expected_statement and acc.account_code.startswith(first_digit)
+        ]
+
+        # Fallback if no account matches the first digit
+        if not matching_pool:
+            matching_pool = [
+                acc for acc in self.postable_accounts
+                if acc.statement == expected_statement
+            ]
+        if not matching_pool:
+            matching_pool = self.postable_accounts
+
+        scored_candidates: list[dict[str, Any]] = []
+        for acc in matching_pool:
+            is_self_offsetting = acc.account_code in other
+
+            # Name similarity (token_set_ratio)
+            name_score = float(fuzz.token_set_ratio(description, acc.account_name)) if description else 0.0
+
+            # Code proximity (shared prefix length)
+            prefix_len = 0
+            for c1, c2 in zip(clean_code, acc.account_code):
+                if c1 == c2:
+                    prefix_len += 1
+                else:
+                    break
+
+            # Primary signal: name similarity (0-100). Secondary signal: code prefix length (2.0 points per matching prefix char)
+            total_score = round(name_score + (prefix_len * 2.0), 2)
+
+            scored_candidates.append({
                 "account_code": acc.account_code,
                 "account_name": acc.account_name,
-                "score": round(score, 2),
+                "name_score": round(name_score, 2),
+                "prefix_len": prefix_len,
+                "score": total_score,
                 "statement": acc.statement,
-                "match_type": "code_similarity",
-                "would_cause_self_offsetting": acc.account_code in other,
+                "match_type": "name_similarity_with_code_proximity",
+                "would_cause_self_offsetting": is_self_offsetting,
             })
 
-        # 2. Description similarity match if provided
-        if description:
-            name_choices = {acc.account_name: acc for acc in self.postable_accounts}
-            name_matches = process.extract(
-                description,
-                name_choices.keys(),
-                scorer=fuzz.token_set_ratio,
-                limit=limit,
-            )
-            for match_name, score, _ in name_matches:
-                acc = name_choices[match_name]
-                if not any(s["account_code"] == acc.account_code for s in suggestions):
-                    suggestions.append({
-                        "account_code": acc.account_code,
-                        "account_name": acc.account_name,
-                        "score": round(score, 2),
-                        "statement": acc.statement,
-                        "match_type": "name_similarity",
-                        "would_cause_self_offsetting": acc.account_code in other,
-                    })
+        # Sort primarily by total score descending, then by prefix_len descending
+        scored_candidates.sort(key=lambda x: (x["score"], x["prefix_len"]), reverse=True)
+        return scored_candidates[:limit]
 
-        suggestions.sort(key=lambda x: x["score"], reverse=True)
-        return suggestions[:limit]

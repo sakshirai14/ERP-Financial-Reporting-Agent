@@ -1,7 +1,7 @@
 # Financial Reporting Agent: Batch Integrity & Accounting Issues Report
 
-**Generated At:** 2026-10-29T14:07:25.341221+00:00
-**Policy Fingerprint:** `0262d6dee2f11f476e14902369cc09d0f7eaa4f6ab4742dcc5bcda844ed7263a`
+**Generated At:** 2026-10-29T14:33:37.619614+00:00
+**Policy Fingerprint:** `7dfb98445e6b81fb0ba022a2b6a011fd1ca91550cb0ef0510f08ea2b4748ca12`
 
 ## Executive Summary
 

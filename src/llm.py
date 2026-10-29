@@ -10,8 +10,10 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from src.config import ReportingAgentConfig
 from src.dq_checks import check_posting_eligibility
 from src.ingest import CoaIndex
+
 
 
 @dataclass
@@ -91,10 +93,10 @@ class MockLLMProvider(LLMProvider):
                 runner_up = non_offsetting[1] if len(non_offsetting) > 1 else None
                 if runner_up:
                     margin = max(0.0, chosen["score"] - runner_up["score"])
-                    confidence = round(min(0.95, max(0.60, (chosen["score"] * 0.75 + margin * 0.5) / 100.0)), 2)
+                    confidence = round(min(0.95, (chosen["score"] * 0.70 + margin * 0.30) / 100.0), 2)
                     rationale = f"Selected {chosen['code']} ({chosen['name']}) with score {chosen['score']:.1f} over {runner_up['code']} ({runner_up['name']}) while avoiding self-offsetting."
                 else:
-                    confidence = round(min(0.95, max(0.60, chosen["score"] / 100.0)), 2)
+                    confidence = round(min(0.95, chosen["score"] / 100.0), 2)
                     rationale = f"Selected {chosen['code']} ({chosen['name']}) with score {chosen['score']:.1f} as the sole viable non-self-offsetting candidate."
                 return json.dumps({
                     "selected_code": chosen["code"],
@@ -102,11 +104,11 @@ class MockLLMProvider(LLMProvider):
                     "rationale": rationale,
                 })
             else:
-                # Every candidate causes self-offsetting! Return low confidence (< 0.60) so it escalates
+                # Every candidate causes self-offsetting! Return 0.0 confidence so it escalates
                 chosen = sorted_by_score[0]
                 return json.dumps({
-                    "selected_code": chosen["code"],
-                    "confidence": 0.40,
+                    "selected_code": None,
+                    "confidence": 0.0,
                     "rationale": f"All candidate accounts including {chosen['code']} ({chosen['name']}) cause self-offsetting postings; escalated for human review.",
                 })
 
@@ -260,6 +262,7 @@ class AccountingExplanationEngine:
         self,
         provider: Optional[LLMProvider | str] = None,
         coa_index: Optional[CoaIndex] = None,
+        config: Optional[ReportingAgentConfig] = None,
     ):
         if isinstance(provider, LLMProvider):
             self.provider = provider
@@ -269,6 +272,7 @@ class AccountingExplanationEngine:
             self.provider = get_llm_provider()
 
         self.coa = coa_index
+        self.config = config or ReportingAgentConfig()
         self.trace_events: list[dict[str, Any]] = []
 
     def rank_account_candidates(
@@ -311,14 +315,15 @@ class AccountingExplanationEngine:
         try:
             raw_response = self.provider.generate(prompt)
             data = json.loads(raw_response)
-            selected = str(data.get("selected_code", "")).strip()
+            selected_raw = data.get("selected_code")
+            selected = str(selected_raw).strip() if selected_raw is not None and str(selected_raw).strip() not in ("", "None", "null") else None
             confidence = float(data.get("confidence", 0.0))
             rationale = str(data.get("rationale", "")).strip()
 
-            # Validation 1: Hallucination check (Must be in candidate list)
-            if selected not in candidate_codes:
+            # Validation 1: Hallucination check (Must be in candidate list if provided)
+            if selected and selected not in candidate_codes:
                 result = LLMRankingResult(
-                    selected_code=selected,
+                    selected_code=None,
                     confidence=confidence,
                     rationale=rationale,
                     is_valid=False,
@@ -333,9 +338,9 @@ class AccountingExplanationEngine:
                 return result
 
             # Validation 2: Posting eligibility check
-            if self.coa and not check_posting_eligibility(selected, self.coa).eligible:
+            if selected and self.coa and not check_posting_eligibility(selected, self.coa).eligible:
                 result = LLMRankingResult(
-                    selected_code=selected,
+                    selected_code=None,
                     confidence=confidence,
                     rationale=rationale,
                     is_valid=False,
@@ -349,14 +354,35 @@ class AccountingExplanationEngine:
                 self._record_ranking_event(entry_id, prompt, raw_response, result)
                 return result
 
-            # Validation 3: Confidence threshold check
-            is_self_offsetting = selected in other
-            is_low_confidence = confidence < 0.60
-            escalated = is_low_confidence
-            escalation_reason = "Low confidence ranking (< 0.60). Human review required." if is_low_confidence else None
+            # Validation 3: Confidence threshold check & self-offsetting check
+            threshold = (
+                self.config.approval.mapping_confidence_threshold
+                if hasattr(self, "config") and self.config
+                else 0.60
+            )
+            has_safe_candidate = any(
+                not c.get("would_cause_self_offsetting", False) and (c["account_code"] not in other)
+                for c in candidates
+            )
+            is_self_offsetting = (selected in other) if selected else False
+            is_low_confidence = confidence < threshold
+            escalated = is_low_confidence or (not has_safe_candidate) or is_self_offsetting or (selected is None)
+
+            if not has_safe_candidate:
+                escalation_reason = "No non-self-offsetting candidate accounts available. Human review required."
+            elif is_self_offsetting:
+                escalation_reason = f"Selected account {selected} would cause self-offsetting journal entry. Human review required."
+            elif is_low_confidence:
+                escalation_reason = f"Low confidence ranking ({confidence:.2f} < {threshold:.2f}). Human review required."
+            elif selected is None:
+                escalation_reason = "No candidate selected by model. Human review required."
+            else:
+                escalation_reason = None
+
+            final_selected = selected if not escalated else None
 
             result = LLMRankingResult(
-                selected_code=selected,
+                selected_code=final_selected,
                 confidence=confidence,
                 rationale=rationale,
                 is_valid=True,
@@ -465,12 +491,14 @@ class AccountingExplanationEngine:
         if issue_code == "JE_ACCOUNT_UNMAPPED":
             unmapped = ctx.get("unmapped_account", "an unmapped code")
             suggestion_str = ""
-            if ranking_result and ranking_result.is_valid and ranking_result.selected_code:
+            if ranking_result and ranking_result.is_valid and not ranking_result.escalated and ranking_result.selected_code:
                 warn_offset = " (WARNING: would cause self-offsetting balance)" if ranking_result.would_cause_self_offsetting else ""
                 suggestion_str = (
                     f" AI suggested mapping: {ranking_result.selected_code} (Confidence: {ranking_result.confidence:.2f}){warn_offset}. "
                     f"Rationale: {ranking_result.rationale}"
                 )
+            elif (ranking_result and ranking_result.escalated) or not ranking_result:
+                suggestion_str = " AI could not identify a safe account; human decision required."
             elif suggestions:
                 top = suggestions[0]
                 suggestion_str = f" Closest candidate in active Chart of Accounts is {top['account_code']} ({top['account_name']})."

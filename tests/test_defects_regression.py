@@ -876,37 +876,69 @@ def test_llm_trace_events_logged_in_run_trace_jsonl(data_path, tmp_path):
     assert ev["model"] == "mock"
 
 
-def test_je005_mock_suggestion_is_not_6310(loaded_coa):
-    """FIX 4 Amendment: Mock provider chooses highest non-self-offsetting candidate (6300, NOT 6310)."""
+def test_je005_suggestion_never_asset_or_liability_and_is_escalated(loaded_coa, default_config):
+    """JE-005 (6315) candidates must be restricted to 6xxx family (never asset/liability), and JE-005 must be escalated."""
+    from src.resolver import AccountResolver
     from src.llm import AccountingExplanationEngine
 
-    engine = AccountingExplanationEngine(coa_index=loaded_coa)
-    candidates = [
-        {"account_code": "6310", "account_name": "Travel and Entertainment", "score": 88.89},
-        {"account_code": "6300", "account_name": "Marketing and Advertising", "score": 75.0},
-        {"account_code": "6230", "account_name": "Office Supplies", "score": 50.0},
-    ]
+    resolver = AccountResolver(loaded_coa)
+    sug = resolver.suggest_accounts(
+        "6315",
+        "Reclass conference travel from old code",
+        limit=5,
+        other_accounts={"6310"},
+    )
 
+    # 1. Assert candidates are all in 6000 operating expenses family (PL), never 1xxx assets or 2xxx liabilities
+    assert len(sug) > 0
+    for c in sug:
+        assert c["statement"] == "PL", f"Candidate {c['account_code']} had statement {c['statement']} (expected PL)"
+        assert c["account_code"].startswith("6"), f"Candidate {c['account_code']} not in 6xxx family"
+        assert not c["account_code"].startswith(("1", "2")), f"Candidate {c['account_code']} is asset/liability"
+
+    # 2. Assert JE-005 is escalated because best non-self-offsetting candidate is weak (< threshold)
+    engine = AccountingExplanationEngine(coa_index=loaded_coa, config=default_config)
     res = engine.rank_account_candidates(
         entry_id="JE-005",
         unmapped_code="6315",
-        description="Software subscription reclassification",
-        candidates=candidates,
-        other_accounts={"6310"},  # Line 2 has 6310
+        description="Reclass conference travel from old code",
+        candidates=sug,
+        other_accounts={"6310"},
     )
-
     assert res.is_valid is True
-    assert res.selected_code == "6300"
-    assert res.selected_code != "6310"
-    assert res.would_cause_self_offsetting is False
-    assert "Marketing and Advertising" in res.rationale
+    assert res.escalated is True
+    assert res.selected_code is None
+    assert res.confidence < default_config.approval.mapping_confidence_threshold
 
 
-def test_mock_confidence_varies_with_candidates(loaded_coa):
-    """FIX 4 Amendment: Confidence varies based on candidate score and margin, not a hardcoded constant."""
+def test_confident_matching_description_suggests_expected_account(loaded_coa, default_config):
+    """A clear memo ('Office Supplies purchase' with unmapped 6225) yields confident non-escalated pick of 6220."""
+    from src.resolver import AccountResolver
     from src.llm import AccountingExplanationEngine
 
-    engine = AccountingExplanationEngine(coa_index=loaded_coa)
+    resolver = AccountResolver(loaded_coa)
+    sug = resolver.suggest_accounts("6225", "Office Supplies purchase", limit=5)
+
+    engine = AccountingExplanationEngine(coa_index=loaded_coa, config=default_config)
+    res = engine.rank_account_candidates(
+        entry_id="TEST-01",
+        unmapped_code="6225",
+        description="Office Supplies purchase",
+        candidates=sug,
+        other_accounts=set(),
+    )
+    assert res.is_valid is True
+    assert res.escalated is False
+    assert res.selected_code == "6220"
+    assert res.confidence >= default_config.approval.mapping_confidence_threshold
+    assert "Office Supplies" in res.rationale
+
+
+def test_mock_confidence_varies_with_candidates(loaded_coa, default_config):
+    """Confidence varies based on candidate score and margin, not a hardcoded constant."""
+    from src.llm import AccountingExplanationEngine
+
+    engine = AccountingExplanationEngine(coa_index=loaded_coa, config=default_config)
 
     # High margin set: 92 vs 50 -> high confidence
     candidates_wide = [
@@ -927,11 +959,11 @@ def test_mock_confidence_varies_with_candidates(loaded_coa):
     assert res_tight.confidence != 0.88
 
 
-def test_all_self_offsetting_candidates_escalates(loaded_coa):
-    """FIX 4 Amendment: If every candidate causes self-offsetting, return low confidence (<0.60) so it escalates."""
+def test_all_self_offsetting_candidates_escalates(loaded_coa, default_config):
+    """If every candidate causes self-offsetting, return low confidence (< threshold) so it escalates."""
     from src.llm import AccountingExplanationEngine
 
-    engine = AccountingExplanationEngine(coa_index=loaded_coa)
+    engine = AccountingExplanationEngine(coa_index=loaded_coa, config=default_config)
     candidates = [
         {"account_code": "6310", "account_name": "Travel and Entertainment", "score": 88.89},
         {"account_code": "2170", "account_name": "Intercompany Clearing", "score": 70.0},
@@ -947,8 +979,9 @@ def test_all_self_offsetting_candidates_escalates(loaded_coa):
 
     assert res.is_valid is True
     assert res.escalated is True
-    assert res.confidence < 0.60
+    assert res.confidence < default_config.approval.mapping_confidence_threshold
     assert "escalated" in res.rationale.lower()
+
 
 
 

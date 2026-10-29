@@ -297,7 +297,7 @@ def run_pipeline(
 
     # 9. Generate narrative explanations and fuzzy suggestions
     resolver = AccountResolver(coa_index)
-    explainer = AccountingExplanationEngine(coa_index=coa_index)
+    explainer = AccountingExplanationEngine(coa_index=coa_index, config=config)
     explanations: dict[str, str] = {}
 
     for entry in working_entries:
@@ -321,7 +321,7 @@ def run_pipeline(
                     candidates=suggestions,
                     other_accounts=other_accounts,
                 )
-                adj.details["ai_suggested_account"] = ranking_res.selected_code
+                adj.details["ai_suggested_account"] = ranking_res.selected_code if not ranking_res.escalated else None
                 adj.details["ai_confidence"] = ranking_res.confidence
                 adj.details["ai_escalated"] = ranking_res.escalated
                 adj.details["ai_self_offsetting"] = ranking_res.would_cause_self_offsetting

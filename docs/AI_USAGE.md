@@ -39,6 +39,7 @@ During early planning and analysis phases, generative AI tools produced multiple
 | **GBP Trial Balance Rows** | Claimed GBP was `413,300 across 3 rows` | GBP cash `1110` is `$412,300.00` across exactly **one row**. | CSV row profiling. |
 | **Prior Period Imbalance** | Claimed raw prior gap was `+$2,980,009.80` | Raw debits $35,177,800 vs credits $32,345,000 yield raw gap `+$2,832,800.00`. | Exact decimal summation script. |
 | **Summary Parent Classification** | Classed `3300` (Equity) as an `"expense"` | `3300` is `account_type == "Equity"` with children `3310` and `3320`. | Dynamic account type in `DQ_COA_NON_HEADER_PARENT`. |
+| **Account Suggestion (JE-005 6315)** | Suggested `1131` (Inventory - Finished Goods) at confidence `0.60` unescalated | `6315` is an unmapped P&L Operating Expense under family `6000`; `1131` is an unrelated Balance Sheet asset. | Restrict resolver candidates to same statement (`PL`/`BS`) and family prefix (`6xxx`); rank by description name similarity (`token_set_ratio`); remove `0.60` confidence floor; escalate to human review (`ai_escalated=true`) when below configured threshold. |
 
 ### Architectural Lesson Learned
 Generative models frequently "fill in the blanks" from general corporate accounting patterns rather than reading exact file contents. To eliminate documentation and implementation drift, we instituted `src/tools/profile_data.py`, an automated Python profiling utility that extracts ground-truth figures directly from the source CSV and JSON files, guaranteeing that documentation and tests reflect actual data.

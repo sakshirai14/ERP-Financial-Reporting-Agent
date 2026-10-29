@@ -1,7 +1,7 @@
 # Financial Reporting Agent: Batch Integrity & Accounting Issues Report
 
-**Generated At:** 2026-10-29T14:08:20.170640+00:00
-**Policy Fingerprint:** `0262d6dee2f11f476e14902369cc09d0f7eaa4f6ab4742dcc5bcda844ed7263a`
+**Generated At:** 2026-10-29T14:33:37.732951+00:00
+**Policy Fingerprint:** `7dfb98445e6b81fb0ba022a2b6a011fd1ca91550cb0ef0510f08ea2b4748ca12`
 
 ## Executive Summary
 
@@ -22,7 +22,7 @@
 | **JE-002** | `REJECTED` | `JE_UNBALANCED` | Entry JE-002 violates the fundamental double-entry equation (Debits != Credits). Total debit postings do not equal total credit postings. Under standard accounting rules, unbalanced adjustments cannot be accepted or posted to the general ledger. |
 | **JE-003** | `QUARANTINED` | `JE_FX_MISMATCH` | Entry JE-003 reflects an FX revaluation calculation discrepancy. The entry books $11200.0 USD, but the revaluation delta calculated from the foreign cash balance and closing exchange rate is $19809.60 USD (variance of $-8609.60 USD). The entry is quarantined for finance team reconciliation. |
 | **JE-004** | `ACCEPTED` | None | All validation gates passed cleanly. |
-| **JE-005** | `QUARANTINED` | `JE_ACCOUNT_UNMAPPED` | Entry JE-005 targets account 6315, which is not present in the active Chart of Accounts. The entry has been quarantined for reviewer disambiguation. AI suggested mapping: 1131 (Confidence: 0.60). Rationale: Selected 1131 (Inventory - Finished Goods) with score 50.0 over 1150 (Other Current Assets) while avoiding self-offsetting. |
+| **JE-005** | `QUARANTINED` | `JE_ACCOUNT_UNMAPPED` | Entry JE-005 targets account 6315, which is not present in the active Chart of Accounts. The entry has been quarantined for reviewer disambiguation. AI could not identify a safe account; human decision required. |
 | **JE-006** | `ACCEPTED` | None | All validation gates passed cleanly. |
 | **JE-007** | `ACCEPTED` | None | All validation gates passed cleanly. |
 | **JE-008** | `QUARANTINED` | `JE_SELF_OFFSETTING` | Entry JE-008 debits and credits the exact same account (2170), netting to zero change. While mathematically balanced, self-offsetting journal lines distort line-item reporting. Quarantined for reviewer verification of business justification. |

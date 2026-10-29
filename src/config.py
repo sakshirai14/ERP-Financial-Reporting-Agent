@@ -36,6 +36,8 @@ class ApprovalPolicy:
     require_notes: bool = True
     require_reviewer: bool = True
     require_mapping_for_unmapped_accounts: bool = True
+    mapping_confidence_threshold: float = 0.60
+
 
 
 @dataclass(frozen=True)
@@ -90,6 +92,7 @@ DECISION_RELEVANT_CONFIG_MAP: dict[str, tuple[str, ...]] = {
     "approval.require_notes": ("review_approval_policy", "require_notes"),
     "approval.require_reviewer": ("review_approval_policy", "require_reviewer"),
     "approval.require_mapping_for_unmapped_accounts": ("review_approval_policy", "require_mapping_for_unmapped_accounts"),
+    "approval.mapping_confidence_threshold": ("review_approval_policy", "mapping_confidence_threshold"),
     "reporting.require_currency_safe_tb": ("reporting_policy", "require_currency_safe_tb"),
     "reporting.block_on_missing_rates": ("reporting_policy", "block_on_missing_rates"),
 }
@@ -127,6 +130,7 @@ def get_canonical_fingerprint_dict(config: ReportingAgentConfig) -> dict[str, An
             "require_notes": config.approval.require_notes,
             "require_reviewer": config.approval.require_reviewer,
             "require_mapping_for_unmapped_accounts": config.approval.require_mapping_for_unmapped_accounts,
+            "mapping_confidence_threshold": config.approval.mapping_confidence_threshold,
         },
         "reporting_policy": {
             "require_currency_safe_tb": config.reporting.require_currency_safe_tb,

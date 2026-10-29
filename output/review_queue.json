@@ -61,12 +61,12 @@
     "issue_codes": [
       "JE_ACCOUNT_UNMAPPED"
     ],
-    "explanation": "Entry JE-005 targets account 6315, which is not present in the active Chart of Accounts. The entry has been quarantined for reviewer disambiguation. AI suggested mapping: 1131 (Confidence: 0.60). Rationale: Selected 1131 (Inventory - Finished Goods) with score 50.0 over 1150 (Other Current Assets) while avoiding self-offsetting.",
+    "explanation": "Entry JE-005 targets account 6315, which is not present in the active Chart of Accounts. The entry has been quarantined for reviewer disambiguation. AI could not identify a safe account; human decision required.",
     "details": {
       "unmapped_account": "6315",
-      "ai_suggested_account": "1131",
-      "ai_confidence": 0.6,
-      "ai_escalated": false,
+      "ai_suggested_account": null,
+      "ai_confidence": 0.24,
+      "ai_escalated": true,
       "ai_self_offsetting": false
     },
     "lines": [
