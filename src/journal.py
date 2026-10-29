@@ -152,23 +152,30 @@ def evaluate_fx_revaluation(
 
     # Derivation of booked functional amount
     booked_amount = max(asset_line.debit, asset_line.credit)
-    context["booked_amount"] = booked_amount
+
+    # Standardized consistent context dict across all outcomes
+    context = {
+        "booked_amount": booked_amount,
+        "expected_usd_delta": expected_delta,
+        "discrepancy": booked_amount - expected_delta,
+        "opening_rate": open_rate,
+        "period_end_rate": close_rate,
+        "rates_used": {
+            "opening_rate": str(open_rate),
+            "period_end_rate": str(close_rate),
+        },
+        "source_balance": native_balance,
+        "native_balance": native_balance,
+        "currency": policy.target_currency,
+    }
 
     # Currency basis error check (Heuristic: did preparer post the native EUR balance?)
     if abs(booked_amount - native_balance) <= policy.tolerance and abs(booked_amount - expected_delta) > policy.tolerance:
-        return "JE_CURRENCY_BASIS_INVALID", {
-            "booked_amount": str(booked_amount),
-            "native_balance": str(native_balance),
-            "expected_delta": str(expected_delta),
-        }
+        return "JE_CURRENCY_BASIS_INVALID", context
 
     # Calculation mismatch check
     if abs(booked_amount - expected_delta) > policy.tolerance:
-        return "JE_FX_MISMATCH", {
-            "booked_amount": str(booked_amount),
-            "expected_delta": str(expected_delta),
-            "discrepancy": str(booked_amount - expected_delta),
-        }
+        return "JE_FX_MISMATCH", context
 
     return None, context
 
@@ -223,6 +230,7 @@ def validate_single_entry_full(
 
     if is_fx_candidate:
         fx_issue, fx_ctx = evaluate_fx_revaluation(entry, config.fx, tb, fx_rates, config)
+        details.update(fx_ctx)
         details["fx_context"] = fx_ctx
         if fx_issue:
             issues.append(fx_issue)

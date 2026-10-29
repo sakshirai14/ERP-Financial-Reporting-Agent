@@ -469,3 +469,84 @@ def test_cross_batch_duplicate_genuine_resubmission_quarantined(tmp_path, data_p
     res2 = run_pipeline(data_dir=batch2_dir, output_dir=out_dir, db_path=db_file)
     assert res2.adjustments["JE-001"].disposition == JournalEntryDisposition.QUARANTINED
     assert "JE_PRIOR_ACCEPTANCE" in res2.adjustments["JE-001"].issue_codes
+
+
+# ==============================================================================
+# FIX 2: Output Bugs & Reporting Integrity
+# ==============================================================================
+
+def test_fx_explanation_has_no_unknown_and_fails_on_missing_context():
+    """FIX 2: Explanations must not contain '$unknown USD' or invent hardcoded numbers."""
+    from src.llm import AccountingExplanationEngine
+
+    engine = AccountingExplanationEngine()
+
+    # Valid FX mismatch context
+    valid_ctx = {
+        "booked_amount": "11200.00",
+        "expected_usd_delta": "19809.60",
+        "discrepancy": "-8609.60",
+    }
+    expl = engine.explain_issue("JE-003", "JE_FX_MISMATCH", valid_ctx)
+    assert "unknown" not in expl.lower()
+    assert "$11200.00 USD" in expl
+    assert "$19809.60 USD" in expl
+
+    # Missing context must fail loudly with ValueError rather than inventing fallbacks
+    with pytest.raises(ValueError):
+        engine.explain_issue("JE-003", "JE_FX_MISMATCH", {})
+
+    with pytest.raises(ValueError):
+        engine.explain_issue("JE-003", "JE_CURRENCY_BASIS_INVALID", {})
+
+
+def test_dq_finding_non_header_parent_code_and_type(loaded_coa, loaded_tb, loaded_fx, default_config):
+    """FIX 2: DQ check must be named DQ_COA_NON_HEADER_PARENT and reflect true account type."""
+    from src.dq_checks import run_data_quality_checks
+
+    findings = run_data_quality_checks(loaded_tb, loaded_fx, loaded_coa, [], default_config)
+    finding_3300 = next((f for f in findings if f.code == "DQ_COA_NON_HEADER_PARENT" and f.context.get("account_code") == "3300"), None)
+    assert finding_3300 is not None
+    assert "Equity" in finding_3300.message
+    assert not any(f.code == "DQ_COA_EXPENSE_PARENT" for f in findings)
+
+
+def test_issues_report_displays_human_review_notes_and_original_issues(data_path, tmp_path, default_config, loaded_coa, loaded_tb, loaded_fx):
+    """FIX 2: In issues_report.md, reviewed accepted entries show reviewer note and original issue codes."""
+    db_file = tmp_path / "review.db"
+    out_dir = tmp_path / "output"
+
+    # Step 1: Run baseline pipeline so JE-005 is quarantined
+    res = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res.adjustments["JE-005"].disposition == JournalEntryDisposition.QUARANTINED
+
+    # Step 2: Reviewer maps JE-005 to 6300 (which cleanly passes revalidation)
+    store = ReviewStore(db_file)
+    service = HITLReviewService(store, loaded_coa, default_config, tb=loaded_tb, fx_rates=loaded_fx)
+    map_res = service.map_and_revalidate(
+        entry_id="JE-005",
+        from_account="6315",
+        to_account="6300",
+        reviewer="auditor_jane",
+        notes="Reclassified unmapped travel sub-account to marketing expense",
+    )
+    assert map_res.success is True
+    assert map_res.disposition == JournalEntryDisposition.ACCEPTED
+
+    # Step 3: Re-run pipeline to generate fresh issues_report.md with overlay applied
+    res2 = run_pipeline(data_dir=data_path, output_dir=out_dir, db_path=db_file)
+    assert res2.adjustments["JE-005"].disposition == JournalEntryDisposition.ACCEPTED
+
+    report_path = out_dir / "issues_report.md"
+    assert report_path.exists()
+    content = report_path.read_text(encoding="utf-8")
+
+    # Locate JE-005 line in issues_report.md
+    je005_lines = [line for line in content.splitlines() if "**JE-005**" in line]
+    assert len(je005_lines) == 1
+    je005_line = je005_lines[0]
+
+    assert "Accepted after human review by auditor_jane: Reclassified unmapped travel sub-account to marketing expense" in je005_line
+    assert "`JE_ACCOUNT_UNMAPPED`" in je005_line
+    assert "All validation gates passed cleanly" not in je005_line
+

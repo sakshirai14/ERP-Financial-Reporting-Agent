@@ -441,7 +441,7 @@ class ReviewStore:
                     cache_key, run_hash, policy_fingerprint, results_json, timestamp
                 ) VALUES (?, ?, ?, ?, ?)
                 """,
-                (cache_key, run_hash, policy_fingerprint, json.dumps(results_data), now),
+                (cache_key, run_hash, policy_fingerprint, json.dumps(results_data, default=str), now),
             )
 
     def get_cached_run(self, cache_key: str) -> Optional[dict[str, Any]]:

@@ -35,9 +35,12 @@ class AccountingExplanationEngine:
             )
 
         if issue_code == "JE_FX_MISMATCH":
-            booked = ctx.get("booked_amount", "unknown")
-            expected = ctx.get("expected_usd_delta", "19,809.60")
-            discrepancy = ctx.get("discrepancy", "unknown")
+            fx_data = ctx.get("fx_context", ctx)
+            booked = fx_data.get("booked_amount") or ctx.get("booked_amount")
+            expected = fx_data.get("expected_usd_delta") or ctx.get("expected_usd_delta")
+            discrepancy = fx_data.get("discrepancy") or ctx.get("discrepancy")
+            if not booked or not expected or not discrepancy:
+                raise ValueError(f"Missing required FX context for entry {entry_id}: {ctx}")
             return (
                 f"Entry {entry_id} reflects an FX revaluation calculation discrepancy. "
                 f"The entry books ${booked} USD, but the revaluation delta calculated from "
@@ -46,9 +49,12 @@ class AccountingExplanationEngine:
             )
 
         if issue_code == "JE_CURRENCY_BASIS_INVALID":
-            booked = ctx.get("booked_amount", "unknown")
-            native = ctx.get("native_balance", "825,400.00")
-            expected = ctx.get("expected_usd_delta", "19,809.60")
+            fx_data = ctx.get("fx_context", ctx)
+            booked = fx_data.get("booked_amount") or ctx.get("booked_amount")
+            native = fx_data.get("source_balance") or fx_data.get("native_balance") or ctx.get("source_balance") or ctx.get("native_balance")
+            expected = fx_data.get("expected_usd_delta") or ctx.get("expected_usd_delta")
+            if not booked or not native or not expected:
+                raise ValueError(f"Missing required currency basis context for entry {entry_id}: {ctx}")
             return (
                 f"Entry {entry_id} contains a suspected currency-basis error. "
                 f"The booked functional amount of ${booked} USD matches the native foreign balance ({native} EUR) "

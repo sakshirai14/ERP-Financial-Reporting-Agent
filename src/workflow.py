@@ -245,6 +245,9 @@ def run_pipeline(
                 cur_issues = set(cur_adj.issue_codes)
                 has_hard_fail = any(code in cfg.hard_validation_gates for code in cur_issues)
                 if not has_hard_fail and (cur_issues.issubset(approved_codes | reviewable_advisories) or not cur_issues):
+                    orig_issues = list(approved_codes or cur_issues)
+                    if overlay.get("mapped_account") and not orig_issues:
+                        orig_issues = ["JE_ACCOUNT_UNMAPPED"]
                     adjustments[entry_id] = JournalEntryValidationResult(
                         entry_id=entry_id,
                         disposition=JournalEntryDisposition.ACCEPTED,
@@ -257,7 +260,7 @@ def run_pipeline(
                             **cur_adj.details,
                             "reviewed_by": overlay["reviewer"],
                             "notes": overlay["notes"],
-                            "original_issues": list(cur_issues or approved_codes),
+                            "original_issues": orig_issues,
                         },
                     )
             elif overlay["disposition"] == JournalEntryDisposition.QUARANTINED:

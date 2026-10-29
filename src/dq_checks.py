@@ -221,10 +221,10 @@ def run_data_quality_checks(
         if account.account_type != "Header" and coa_index.has_children(account.account_code):
             findings.append(
                 DataQualityFinding(
-                    code="DQ_COA_EXPENSE_PARENT",
+                    code="DQ_COA_NON_HEADER_PARENT",
                     severity=DiagnosticSeverity.INFO,
                     message=f"Account {account.account_code} ({account.account_name}) has type='{account.account_type}' but acts as parent to child accounts.",
-                    context={"account_code": account.account_code},
+                    context={"account_code": account.account_code, "account_type": account.account_type},
                 )
             )
 

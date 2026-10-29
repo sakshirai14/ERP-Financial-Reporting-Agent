@@ -12,6 +12,7 @@ from src.models import (
     DataQualityFinding,
     ExecutionSummary,
     JournalEntry,
+    JournalEntryDisposition,
     JournalEntryValidationResult,
     PipelineExecutionResult,
 )
@@ -31,7 +32,7 @@ def write_run_trace_jsonl(
             "policy_fingerprint": result.policy_fingerprint,
             "input_file_hashes": result.input_file_hashes,
         }
-        f.write(json.dumps(header_event) + "\n")
+        f.write(json.dumps(header_event, default=str) + "\n")
 
         # Entry validation events
         for entry_id, adj in sorted(result.adjustments.items()):
@@ -45,7 +46,7 @@ def write_run_trace_jsonl(
                 "accounts_postable": adj.accounts_are_postable,
                 "details": adj.details,
             }
-            f.write(json.dumps(entry_event) + "\n")
+            f.write(json.dumps(entry_event, default=str) + "\n")
 
         # DQ events
         for finding in result.dq_findings:
@@ -56,7 +57,7 @@ def write_run_trace_jsonl(
                 "message": finding.message,
                 "context": finding.context,
             }
-            f.write(json.dumps(dq_event) + "\n")
+            f.write(json.dumps(dq_event, default=str) + "\n")
 
         # Summary event
         summary_event = {
@@ -70,7 +71,7 @@ def write_run_trace_jsonl(
                 "total_dq_warnings": result.summary.total_dq_warnings,
             },
         }
-        f.write(json.dumps(summary_event) + "\n")
+        f.write(json.dumps(summary_event, default=str) + "\n")
 
 
 def write_adjustments_decisions_csv(
@@ -88,7 +89,7 @@ def write_adjustments_decisions_csv(
                 adj.disposition.value,
                 ";".join(adj.issue_codes),
                 adj.is_balanced,
-                json.dumps(adj.details),
+                json.dumps(adj.details, default=str),
             ])
 
 
@@ -116,7 +117,7 @@ def write_review_queue_json(
             })
 
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(queue, f, indent=2)
+        json.dump(queue, f, indent=2, default=str)
 
 
 def render_issues_report_md(
@@ -150,8 +151,21 @@ def render_issues_report_md(
     ]
 
     for entry_id, adj in sorted(result.adjustments.items()):
-        codes_str = ", ".join(f"`{c}`" for c in adj.issue_codes) if adj.issue_codes else "None"
-        expl = explanations.get(entry_id, "All validation gates passed cleanly.")
+        is_reviewed_accepted = (
+            adj.disposition == JournalEntryDisposition.ACCEPTED
+            and "reviewed_by" in adj.details
+        )
+        if is_reviewed_accepted:
+            orig_codes = adj.details.get("original_issues") or adj.issue_codes
+            codes_str = ", ".join(f"`{c}`" for c in orig_codes) if orig_codes else "None"
+            reviewer = adj.details.get("reviewed_by")
+            notes = adj.details.get("notes", "")
+            notes_suffix = f": {notes}" if notes else ""
+            expl = f"Accepted after human review by {reviewer}{notes_suffix}".strip()
+        else:
+            codes_str = ", ".join(f"`{c}`" for c in adj.issue_codes) if adj.issue_codes else "None"
+            expl = explanations.get(entry_id, "All validation gates passed cleanly.")
+
         lines.append(f"| **{entry_id}** | `{adj.disposition.value}` | {codes_str} | {expl} |")
 
     lines.extend([
