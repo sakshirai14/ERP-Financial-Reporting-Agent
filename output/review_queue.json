@@ -1,0 +1,118 @@
+[
+  {
+    "entry_id": "JE-003",
+    "description": "FX revaluation of EUR cash balance to period-end rate",
+    "source": "FX reval calc",
+    "date": "2024-12-31",
+    "issue_codes": [
+      "JE_FX_MISMATCH"
+    ],
+    "explanation": "Entry JE-003 reflects an FX revaluation calculation discrepancy. The entry books $11200.0 USD, but the revaluation delta calculated from the foreign cash balance and closing exchange rate is $19809.60 USD (variance of $-8609.60 USD). The entry is quarantined for finance team reconciliation.",
+    "details": {
+      "booked_amount": "11200.0",
+      "expected_usd_delta": "19809.60",
+      "discrepancy": "-8609.60",
+      "opening_rate": "1.071",
+      "period_end_rate": "1.095",
+      "rates_used": {
+        "opening_rate": "1.071",
+        "period_end_rate": "1.095"
+      },
+      "source_balance": "825400.00",
+      "native_balance": "825400.00",
+      "currency": "EUR",
+      "fx_context": {
+        "booked_amount": "11200.0",
+        "expected_usd_delta": "19809.60",
+        "discrepancy": "-8609.60",
+        "opening_rate": "1.071",
+        "period_end_rate": "1.095",
+        "rates_used": {
+          "opening_rate": "1.071",
+          "period_end_rate": "1.095"
+        },
+        "source_balance": "825400.00",
+        "native_balance": "825400.00",
+        "currency": "EUR"
+      }
+    },
+    "lines": [
+      {
+        "account": "1110",
+        "debit": "11200.0",
+        "credit": "0.0",
+        "memo": "EUR cash uplift",
+        "currency": null
+      },
+      {
+        "account": "7310",
+        "debit": "0.0",
+        "credit": "11200.0",
+        "memo": "Unrealized FX gain",
+        "currency": null
+      }
+    ]
+  },
+  {
+    "entry_id": "JE-005",
+    "description": "Reclass conference travel from old code",
+    "source": "AP team",
+    "date": "2024-12-15",
+    "issue_codes": [
+      "JE_ACCOUNT_UNMAPPED"
+    ],
+    "explanation": "Entry JE-005 targets account 6315, which is not present in the active Chart of Accounts. The entry has been quarantined for reviewer disambiguation. AI suggested mapping: 1131 (Confidence: 0.60). Rationale: Selected 1131 (Inventory - Finished Goods) with score 50.0 over 1150 (Other Current Assets) while avoiding self-offsetting.",
+    "details": {
+      "unmapped_account": "6315",
+      "ai_suggested_account": "1131",
+      "ai_confidence": 0.6,
+      "ai_escalated": false,
+      "ai_self_offsetting": false
+    },
+    "lines": [
+      {
+        "account": "6315",
+        "debit": "18500.0",
+        "credit": "0.0",
+        "memo": "Conf travel",
+        "currency": null
+      },
+      {
+        "account": "6310",
+        "debit": "0.0",
+        "credit": "18500.0",
+        "memo": "Out of T&E",
+        "currency": null
+      }
+    ]
+  },
+  {
+    "entry_id": "JE-008",
+    "description": "Intercompany settlement \u2014 UK sub",
+    "source": "IC reconciliation",
+    "date": "2024-12-30",
+    "issue_codes": [
+      "JE_SELF_OFFSETTING"
+    ],
+    "explanation": "Entry JE-008 debits and credits the exact same account (2170), netting to zero change. While mathematically balanced, self-offsetting journal lines distort line-item reporting. Quarantined for reviewer verification of business justification.",
+    "details": {
+      "offsetting_account": "2170"
+    },
+    "lines": [
+      {
+        "account": "2170",
+        "debit": "320000.0",
+        "credit": "0.0",
+        "memo": "IC payable down",
+        "currency": null
+      },
+      {
+        "account": "2170",
+        "debit": "0.0",
+        "credit": "320000.0",
+        "memo": "IC payable up",
+        "currency": null
+      }
+    ]
+  }
+]

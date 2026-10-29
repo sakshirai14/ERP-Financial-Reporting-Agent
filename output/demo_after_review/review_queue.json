@@ -1,0 +1,56 @@
+[
+  {
+    "entry_id": "JE-003",
+    "description": "FX revaluation of EUR cash balance to period-end rate",
+    "source": "FX reval calc",
+    "date": "2024-12-31",
+    "issue_codes": [
+      "JE_FX_MISMATCH"
+    ],
+    "explanation": "Entry JE-003 reflects an FX revaluation calculation discrepancy. The entry books $11200.0 USD, but the revaluation delta calculated from the foreign cash balance and closing exchange rate is $19809.60 USD (variance of $-8609.60 USD). The entry is quarantined for finance team reconciliation.",
+    "details": {
+      "booked_amount": "11200.0",
+      "expected_usd_delta": "19809.60",
+      "discrepancy": "-8609.60",
+      "opening_rate": "1.071",
+      "period_end_rate": "1.095",
+      "rates_used": {
+        "opening_rate": "1.071",
+        "period_end_rate": "1.095"
+      },
+      "source_balance": "825400.00",
+      "native_balance": "825400.00",
+      "currency": "EUR",
+      "fx_context": {
+        "booked_amount": "11200.0",
+        "expected_usd_delta": "19809.60",
+        "discrepancy": "-8609.60",
+        "opening_rate": "1.071",
+        "period_end_rate": "1.095",
+        "rates_used": {
+          "opening_rate": "1.071",
+          "period_end_rate": "1.095"
+        },
+        "source_balance": "825400.00",
+        "native_balance": "825400.00",
+        "currency": "EUR"
+      }
+    },
+    "lines": [
+      {
+        "account": "1110",
+        "debit": "11200.0",
+        "credit": "0.0",
+        "memo": "EUR cash uplift",
+        "currency": null
+      },
+      {
+        "account": "7310",
+        "debit": "0.0",
+        "credit": "11200.0",
+        "memo": "Unrealized FX gain",
+        "currency": null
+      }
+    ]
+  }
+]

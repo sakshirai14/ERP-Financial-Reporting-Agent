@@ -39,7 +39,6 @@ htmlcov/
 *.swo
 
 # Output directory (generated run artifacts, review store SQLite)
-output/
 output/*.db
 *.db
 scratch/
