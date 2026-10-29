@@ -229,8 +229,15 @@ def run_data_quality_checks(
         if rate_row.rate_type == "opening":
             opening_rates[rate_row.currency] = rate_row.rate
 
+    pp_raw_debits = sum(row.debit for row in prior_tb)
+    pp_raw_credits = sum(row.credit for row in prior_tb)
+    pp_raw_gap = pp_raw_debits - pp_raw_credits
+
     pp_debits = Decimal("0.00")
     pp_credits = Decimal("0.00")
+    used_rates_desc = [f"{cur}: {rate}" for cur, rate in sorted(opening_rates.items())]
+    rates_str = ", ".join(used_rates_desc)
+
     for row in prior_tb:
         if not coa_index.account_exists(row.account_code):
             findings.append(
@@ -246,17 +253,23 @@ def run_data_quality_checks(
         pp_credits += (row.credit * rate).quantize(Decimal("0.01"))
 
     pp_gap = pp_debits - pp_credits
-    if pp_gap != Decimal("0.00"):
+    if pp_gap != Decimal("0.00") or pp_raw_gap != Decimal("0.00"):
         findings.append(
             DataQualityFinding(
                 code="DQ_PPTB_IMBALANCE",
                 severity=DiagnosticSeverity.WARNING,
                 message=(
-                    f"Prior-period trial balance extract has translated USD-equivalent imbalance of ${pp_gap:,.2f} USD "
-                    f"(Debits: ${pp_debits:,.2f}, Credits: ${pp_credits:,.2f}). "
+                    f"Prior-period trial balance extract imbalance: "
+                    f"(a) Raw gap is ${pp_raw_gap:,.2f} USD (Debits: ${pp_raw_debits:,.2f}, Credits: ${pp_raw_credits:,.2f}). "
+                    f"(b) Translated gap is ${pp_gap:,.2f} USD (Debits: ${pp_debits:,.2f}, Credits: ${pp_credits:,.2f}) "
+                    f"using opening FX rates ({rates_str}). Currency ambiguity applies here as well (unclear whether foreign lines were pre-translated). "
                     "Treated as partial balance-sheet extract with non-operating expenses; does not block current-period adjustments."
                 ),
-                context={"pp_gap": str(pp_gap)},
+                context={
+                    "pp_raw_gap": str(pp_raw_gap),
+                    "pp_translated_gap": str(pp_gap),
+                    "rates_used": {c: str(r) for c, r in opening_rates.items()},
+                },
             )
         )
 

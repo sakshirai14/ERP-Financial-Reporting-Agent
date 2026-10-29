@@ -16,7 +16,7 @@ This document provides the definitive, verified catalogue of data quality and ac
 | **F-04c** | `chart_of_accounts.csv` | Leaf Header Account without Children (`1290`) | Medium | `INFO` (`DQ_COA_LEAF_HEADER`) | Enforced as Non-Postable (Condition A) |
 | **F-04d** | `chart_of_accounts.csv` | Non-Header Accounts Acting as Summary Parents (`3300`, `8000`) | Medium | `INFO` (`DQ_COA_NON_HEADER_PARENT`) | Enforced as Non-Postable (Condition B) |
 | **F-04e** | `chart_of_accounts.csv` | Cash Flow Category Mismatches (P&L with CF, Equity without CF) | Low | `INFO` (`DQ_COA_CF_CATEGORY_MISMATCH`) | Detected & Logged |
-| **F-05** | `prior_period_tb.csv` | Prior-Period Extract Imbalance ($+\$2,832,800.00\text{ USD}$) | Medium | `WARNING` (`DQ_PPTB_IMBALANCE`) | Qualified as Incomplete BS Extract |
+| **F-05** | `prior_period_tb.csv` | Prior-Period Extract Imbalance (Raw $+\$2,832,800$, Translated $+\$2,980,010$) | Medium | `WARNING` (`DQ_PPTB_IMBALANCE`) | Qualified as Incomplete BS Extract |
 | **F-06** | `prior_period_tb.csv` | Prior-Period Account Absent from COA (`6905` "Sundry Operating Expenses") | Medium | `WARNING` (`DQ_PPTB_ACCOUNT_ABSENT_COA`) | Flagged for COA Transition Mapping |
 | **F-07** | `fx_rates.csv` | Missing Period-End Exchange Rate (`GBP`, `period_end`) | High | `WARNING` (`DQ_RATE_MISSING`) | Fail-Closed; Blocks Full Reconciliation |
 | **F-08** | `manual_adjustments.json` | Manual Adjustment JE-002 Unbalanced ($\text{Diff } +\$3,500.00$) | Critical | `REJECTED` (`JE_UNBALANCED`) | Rejected at Hard Gate; Approval Refused |
@@ -101,9 +101,12 @@ This document provides the definitive, verified catalogue of data quality and ac
 - **Verified Source Data:**
   - Raw Debits: $\$35,177,800.00$
   - Raw Credits: $\$32,345,000.00$
-  - Raw Gap: $+\$2,832,800.00$ (NOT $\$2,980,009.80$).
+  - Raw Gap: $+\$2,832,800.00\text{ USD}$
+  - Translated Debits: $\$35,325,009.80\text{ USD}$
+  - Translated Credits: $\$32,345,000.00\text{ USD}$
+  - Translated Gap: $+\$2,980,009.80\text{ USD}$ using opening FX rates (EUR: 1.071, GBP: 1.251, USD: 1.0).
 - **Accounting Defect & System Action:**
-  The extract contains only balance sheet accounts with zero revenue or expense rows. The agent emits `DQ_PPTB_IMBALANCE` and notes that comparative equity analysis requires post-closing retained earnings adjustments.
+  The extract contains only balance sheet accounts with zero revenue or expense rows. The agent emits `DQ_PPTB_IMBALANCE` reporting both the raw gap ($+\$2,832,800.00$) and the translated gap ($+\$2,980,009.80$), labelling the opening rates used and noting that multi-currency ambiguity applies here as well (unclear whether foreign lines in the extract were already translated). Notes that comparative equity analysis requires post-closing retained earnings adjustments.
 
 ---
 
